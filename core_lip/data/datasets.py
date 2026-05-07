@@ -26,7 +26,6 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-
 # ---------------------------------------------------------------------------
 # Amino-acid vocabulary (0 reserved for padding)
 # ---------------------------------------------------------------------------
@@ -123,7 +122,7 @@ def collate_proteins(batch: list) -> tuple:
         (B, xs_pairwise[0].shape[0], max_len, max_len), dtype=torch.float32
     )
     seq_pad = torch.zeros((B, max_len), dtype=torch.long)
-    y_pad = torch.full((B, max_len), fill_value=-100, dtype=torch.long)
+    y_pad = torch.full((B, max_len), fill_value=-1, dtype=torch.long)
 
     # PLM pad setup
     plm_pad = None

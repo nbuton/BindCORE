@@ -79,7 +79,7 @@ def compute_residue_metrics(
     y_mask = y_true != -1
     y_true = y_true[y_mask]
     y_score = np.concatenate(
-        [r.scores[model_name].astype(np.float64) for r in records.values()]
+        [r.scores[model_name].astype(np.float32) for r in records.values()]
     )
     y_score = y_score[y_mask]
     y_pred = np.concatenate(

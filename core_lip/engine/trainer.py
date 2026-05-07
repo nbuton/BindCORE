@@ -31,6 +31,7 @@ from core_lip.data.datasets import ProteinDataset, collate_proteins
 from core_lip.data.io import (
     cluster_sequences_mmseqs2,
     get_all_feature_stats,
+    ham_mask_val_labels,
     prepare_data,
     read_protein_data,
 )
@@ -134,7 +135,7 @@ class CORE_LIP_Trainer:
         else:
             seq_df = pd.DataFrame({"id": ids, "sequence": seqs})
             cluster_df = cluster_sequences_mmseqs2(
-                seq_df, output_file="data/TR1000_cluster.csv"
+                seq_df, output_file="data/TR1000_cluster.csv", seq_identity=0.3
             )
 
             all_clusters = cluster_df["cluster"].unique()
@@ -152,6 +153,12 @@ class CORE_LIP_Trainer:
 
             print(
                 f"[split] OOD split: {len(train_indices)} train, {len(val_indices)} val proteins."
+            )
+            # HAM-equivalent: mask val residues locally homologous to training sequences
+            ham_mask_val_labels(
+                val_indices=val_indices,
+                train_indices=train_indices,
+                dataset=self.dataset,
             )
 
         loader_kwargs = dict(
@@ -292,6 +299,7 @@ class CORE_LIP_Trainer:
             raise ValueError(f"Unknown {self.train_cfg.scheduler_type} scheduler type")
 
         best_pr_auc = float("-inf")
+        best_val_loss = float("inf")
 
         for epoch in range(1, self.train_cfg.epochs + 1):
             t_loss = train_one_epoch(
@@ -320,13 +328,14 @@ class CORE_LIP_Trainer:
                 log_str += f" | val_loss={val_loss:.4f} | val_ROC-AUC={val_roc_auc:.4f} | val_PR-AUC={val_pr_auc:.4f}"
                 print(log_str)
 
-                if val_pr_auc > best_pr_auc:
+                if val_loss < best_val_loss:
                     best_pr_auc = val_pr_auc
+                    best_val_loss = val_loss
                     self.save_checkpoint(auc=best_pr_auc)
                 else:
                     # Restoration of the "did not improve" notification
                     print(
-                        f"  - Validation AUC did not improve, checkpoint not updated."
+                        f"  - Validation loss did not improve, checkpoint not updated."
                     )
             else:
                 print(log_str)

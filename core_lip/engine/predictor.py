@@ -160,7 +160,7 @@ def predict_dataset(
                 {
                     "protein_id": prot_id,
                     "length": len(valid_probs),
-                    "predictions": ",".join(f"{p:.6f}" for p in valid_probs.tolist()),
+                    "predictions": ",".join(f"{p:.8f}" for p in valid_probs.tolist()),
                     "binary_predictions": ",".join(map(str, binary.tolist())),
                 }
             )
