@@ -258,7 +258,7 @@ class CORE_LIP_Trainer:
                 softness=1.0,
                 batch_size=int(self.train_cfg.batch_size * self.train_cfg.accumulation),
                 warmup_steps=32,
-                rho=0.9,
+                rho=0.99,
             )
         else:
             raise ValueError(f"Unknown {self.train_cfg.optimizer} optimizer type")
@@ -443,6 +443,9 @@ def train_one_epoch(
             optimizer.step()
             optimizer.zero_grad(set_to_none=True)
             scheduler.step()
+        # For debug
+        # if isinstance(optimizer, PRM) and batch_idx % 10 == 0:
+        #     print("Active fraction:", optimizer.get_mask_stats()["active_fraction"])
 
         # Undo the accumulation scaling to track the true loss magnitude
         total_loss += loss.item() * accumulation_steps * y.size(0)
