@@ -237,17 +237,20 @@ def main():
         title="ROC Curves - LIP Test Set (residue level)",
         save_path=output_dir / "roc_curves.pdf",
     )
+    plt.savefig("data/ROC_curve.png")
     plot_pr_curves(
         test_records,
         model_names,
         title="Precision-Recall Curves - LIP Test Set (residue level)",
         save_path=output_dir / "pr_curves.pdf",
     )
+    plt.savefig("data/Precision_Recall_curve.png")
     plot_metrics_bar(
         all_results,
         title="Model Performance - LIP Test Set (residue level)",
         save_path=output_dir / "metrics_bar.pdf",
     )
+    plt.savefig("data/bar_plot.png")
     plt.show()
 
 

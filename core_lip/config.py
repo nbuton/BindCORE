@@ -80,6 +80,8 @@ class TrainingConfig(BaseModel):
     lr: float
     weight_decay: float
     seed: int
+    use_ema: bool = False
+    ema_decay: float = 0.999
     h5_properties: Path
     training_dataset: Path
     SCALAR_FEATURES: List

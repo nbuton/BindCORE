@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import math
 import os
+os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
 import random
 
 import h5py
@@ -52,6 +53,9 @@ def set_seed(seed: int = 42) -> None:
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    torch.use_deterministic_algorithms(True)
 
 
 # ---------------------------------------------------------------------------
@@ -96,6 +100,7 @@ class CORE_LIP_Trainer:
             "val_pr_auc": [],
             "val_roc_auc": [],
         }
+        self.ema_shadow = {}
 
     def prepare_loaders(self):
         """Handles data loading and OOD splitting logic."""
@@ -256,7 +261,6 @@ class CORE_LIP_Trainer:
                 lr=self.train_cfg.lr,
                 weight_decay=self.train_cfg.weight_decay,
                 softness=1.0,
-                batch_size=int(self.train_cfg.batch_size * self.train_cfg.accumulation),
                 warmup_steps=32,
                 rho=0.99,
             )
@@ -302,7 +306,7 @@ class CORE_LIP_Trainer:
         best_val_loss = float("inf")
 
         for epoch in range(1, self.train_cfg.epochs + 1):
-            t_loss = train_one_epoch(
+            t_loss = self.train_one_epoch(
                 self.model,
                 self.train_loader,
                 self.optimizer,
@@ -313,10 +317,21 @@ class CORE_LIP_Trainer:
             )
             self.history["train_loss"].append(t_loss)
 
+            
+
             log_str = f"Epoch {epoch:03d} | train_loss={t_loss:.4f}"
 
-            # Only evaluate if val_loader exists
             if self.val_loader:
+                use_ema_for_eval = (
+                    self.train_cfg.use_ema
+                    and bool(self.ema_shadow)
+                )
+
+                if use_ema_for_eval:
+                    with torch.no_grad():
+                        raw_state = {n: p.clone() for n, p in self.model.named_parameters() if p.requires_grad}
+                    self._apply_ema()
+
                 val_loss, val_roc_auc, val_pr_auc = evaluate(
                     self.model, self.val_loader, self.criterion, self.device
                 )
@@ -324,27 +339,30 @@ class CORE_LIP_Trainer:
                 self.history["val_roc_auc"].append(val_roc_auc)
                 self.history["val_pr_auc"].append(val_pr_auc)
 
-                # Restoration of ROC-AUC and PR-AUC labels
                 log_str += f" | val_loss={val_loss:.4f} | val_ROC-AUC={val_roc_auc:.4f} | val_PR-AUC={val_pr_auc:.4f}"
                 print(log_str)
 
-                if val_loss < best_val_loss:
+                if val_pr_auc > best_pr_auc:
                     best_pr_auc = val_pr_auc
                     best_val_loss = val_loss
                     self.save_checkpoint(auc=best_pr_auc)
                 else:
-                    # Restoration of the "did not improve" notification
-                    print(
-                        f"  - Validation loss did not improve, checkpoint not updated."
-                    )
+                    print(f"  - PR-AUC did not improve, checkpoint not updated.")
+
+                if use_ema_for_eval:
+                    with torch.no_grad():
+                        for name, p in self.model.named_parameters():
+                            if name in raw_state:
+                                p.copy_(raw_state[name])
+
             else:
                 print(log_str)
-                # If no validation, save the model at the last epoch
                 if epoch == self.train_cfg.epochs:
+                    if self.train_cfg.use_ema and bool(self.ema_shadow):
+                        self._apply_ema()
                     self.save_checkpoint(is_final=True)
 
         if self.threshold_selection:
-            # Post-training: Threshold selection
             checkpoint = torch.load(
                 self.model_save_path, map_location=self.device, weights_only=False
             )
@@ -355,7 +373,8 @@ class CORE_LIP_Trainer:
             checkpoint["best_threshold"] = best_thr
             torch.save(checkpoint, self.model_save_path)
             print(f"Final threshold (CV-MCC): {best_thr:.6f}")
-        return best_pr_auc
+
+        return np.mean(self.history["val_pr_auc"][-5:])
 
     def plot(self):
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
@@ -370,85 +389,106 @@ class CORE_LIP_Trainer:
             ax2.set_title("Validation PR-AUC")
 
         plt.tight_layout()
+        plt.savefig("data/last_training_fig.png")
         plt.show()
 
 
-def train_one_epoch(
-    model: torch.nn.Module,
-    loader,
-    optimizer: torch.optim.Optimizer,
-    scheduler,
-    criterion,
-    accumulation_steps: int,
-    device: torch.device,
-    grad_clip: float = 1.0,
-) -> float:
-    """
-    Run one full training epoch with gradient accumulation.
+    @torch.no_grad()
+    def _ema_update(self):
+        decay = self.train_cfg.ema_decay
+        for name, p in self.model.named_parameters():
+            if not p.requires_grad:
+                continue
+            if name not in self.ema_shadow:
+                self.ema_shadow[name] = p.detach().clone()
+            else:
+                self.ema_shadow[name].mul_(decay).add_(p.detach(), alpha=1.0 - decay)
 
-    Returns
-    -------
-    float
-        Mean training loss over all samples in *loader*.
-    """
-    model.train()
-    total_loss, total = 0.0, 0
-    optimizer.zero_grad(set_to_none=True)
+    @torch.no_grad()
+    def _apply_ema(self):
+        for name, p in self.model.named_parameters():
+            if name in self.ema_shadow:
+                p.copy_(self.ema_shadow[name])
 
-    for batch_idx, (x_scalar, x_local, x_pairwise, seq, mask, y, plm_pad) in tqdm(
-        enumerate(loader), total=len(loader)
-    ):
-        x_scalar = x_scalar.to(device)
-        x_local = x_local.to(device)
-        x_pairwise = x_pairwise.to(device)
-        tokens = seq.long().to(device)
-        mask = mask.to(device)
-        y = y.to(device)
-        if plm_pad is not None:
-            plm_pad = plm_pad.to(device)
 
-        logits = model(tokens, x_scalar, x_local, x_pairwise, mask, plm_pad)
-        logits = logits.squeeze(-1)  # [batch, length]
+    def train_one_epoch(self,
+        model: torch.nn.Module,
+        loader,
+        optimizer: torch.optim.Optimizer,
+        scheduler,
+        criterion,
+        accumulation_steps: int,
+        device: torch.device,
+        grad_clip: float = 1.0,
+    ) -> float:
+        """
+        Run one full training epoch with gradient accumulation.
 
-        if not torch.isfinite(logits).all():
-            raise RuntimeError(f"Non-finite logits at batch {batch_idx}.")
+        Returns
+        -------
+        float
+            Mean training loss over all samples in *loader*.
+        """
+        model.train()
+        total_loss, total = 0.0, 0
+        optimizer.zero_grad(set_to_none=True)
 
-        # 1. Identify valid labels (ignore -1)
-        valid_label_mask = (y != -1).float()
+        for batch_idx, (x_scalar, x_local, x_pairwise, seq, mask, y, plm_pad) in tqdm(
+            enumerate(loader), total=len(loader)
+        ):
+            x_scalar = x_scalar.to(device)
+            x_local = x_local.to(device)
+            x_pairwise = x_pairwise.to(device)
+            tokens = seq.long().to(device)
+            mask = mask.to(device)
+            y = y.to(device)
+            if plm_pad is not None:
+                plm_pad = plm_pad.to(device)
 
-        # 2. Combine the padding mask and label mask
-        # If either is 0.0 (padded OR unknown), the combined mask becomes 0.0
-        combined_mask = mask * valid_label_mask
+            logits = model(tokens, x_scalar, x_local, x_pairwise, mask, plm_pad)
+            logits = logits.squeeze(-1)  # [batch, length]
 
-        # 3. Clean y: Replace -1 with 0.0 so BCEWithLogitsLoss doesn't error out
-        y_clean = y.clone().float()
-        y_clean[y == -1] = 0.0
+            if not torch.isfinite(logits).all():
+                raise RuntimeError(f"Non-finite logits at batch {batch_idx}.")
 
-        loss_raw = criterion(logits, y_clean)
-        loss = (
-            (loss_raw * combined_mask).sum()
-            / (combined_mask.sum() + 1e-8)
-            / accumulation_steps
-        )
-        if not torch.isfinite(loss):
-            raise RuntimeError(f"Non-finite loss at batch {batch_idx}.")
+            # 1. Identify valid labels (ignore -1)
+            valid_label_mask = (y != -1).float()
 
-        loss.backward()
+            # 2. Combine the padding mask and label mask
+            # If either is 0.0 (padded OR unknown), the combined mask becomes 0.0
+            combined_mask = mask * valid_label_mask
 
-        if (batch_idx + 1) % accumulation_steps == 0:
-            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
-            if not torch.isfinite(grad_norm):
-                raise RuntimeError(f"Non-finite gradient norm at batch {batch_idx}.")
+            # 3. Clean y: Replace -1 with 0.0 so BCEWithLogitsLoss doesn't error out
+            y_clean = y.clone().float()
+            y_clean[y == -1] = 0.0
 
-            optimizer.step()
-            optimizer.zero_grad(set_to_none=True)
-            scheduler.step()
-        # For debug
-        # if isinstance(optimizer, PRM) and batch_idx % 10 == 0:
-        #     print("Active fraction:", optimizer.get_mask_stats()["active_fraction"])
+            loss_raw = criterion(logits, y_clean)
+            loss = (
+                (loss_raw * combined_mask).sum()
+                / (combined_mask.sum() + 1e-8)
+                / accumulation_steps
+            )
+            if not torch.isfinite(loss):
+                raise RuntimeError(f"Non-finite loss at batch {batch_idx}.")
 
-        # Undo the accumulation scaling to track the true loss magnitude
-        total_loss += loss.item() * accumulation_steps * y.size(0)
-        total += y.size(0)
+            loss.backward()
 
-    return total_loss / max(total, 1)
+            if (batch_idx + 1) % accumulation_steps == 0:
+                grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+                if not torch.isfinite(grad_norm):
+                    raise RuntimeError(f"Non-finite gradient norm at batch {batch_idx}.")
+
+                optimizer.step()
+                optimizer.zero_grad(set_to_none=True)
+                scheduler.step()
+                if self.train_cfg.use_ema:
+                    self._ema_update()
+            # For debug
+            # if isinstance(optimizer, PRM) and batch_idx % 10 == 0:
+            #     print("Active fraction:", optimizer.get_mask_stats()["active_fraction"])
+
+            # Undo the accumulation scaling to track the true loss magnitude
+            total_loss += loss.item() * accumulation_steps * y.size(0)
+            total += y.size(0)
+
+        return total_loss / max(total, 1)
