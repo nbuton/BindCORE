@@ -374,7 +374,21 @@ class CORE_LIP_Trainer:
             torch.save(checkpoint, self.model_save_path)
             print(f"Final threshold (CV-MCC): {best_thr:.6f}")
 
-        return np.mean(self.history["val_pr_auc"][-5:])
+        # For hyperparameters tunning
+        peak_epoch = np.argmax(self.history["val_pr_auc"])
+        peak_value = self.history["val_pr_auc"][peak_epoch]
+
+        # Average of a window around the peak (+/-2 epochs)
+        window = self.history["val_pr_auc"][
+            max(0, peak_epoch - 2) : peak_epoch + 3
+        ]
+        sustained_peak = np.mean(window)
+
+        # Penalize peaks that happen in the first 20% of training
+        total_epochs = len(self.history["val_pr_auc"])
+        earliness_penalty = max(0, 0.2 - peak_epoch / total_epochs) * peak_value
+
+        return sustained_peak - earliness_penalty
 
     def plot(self):
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))

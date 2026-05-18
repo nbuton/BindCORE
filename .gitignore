@@ -5,7 +5,6 @@ core_lip.egg-info/*
 core_lip/__pycache__/**
 scripts/__pycache__/**
 core_lip/**/__pycache__/**
-scripts/tune_hyperparams.py
 ray_results/*
 *.png
 *.log
