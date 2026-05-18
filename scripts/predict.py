@@ -26,7 +26,7 @@ from core_lip.engine.predictor import load_checkpoint, predict_dataset
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run CORE-LIP predictions.")
-    parser.add_argument("--model", default="data/models/core_lip.pt")
+    parser.add_argument("--model", default="data/models/bindCORE.pt")
     parser.add_argument("--h5", default="data/protein_MD_properties.h5")
     parser.add_argument(
         "--datasets", nargs="+", default=["data/CLIP_dataset/TE440_reduced.txt"]

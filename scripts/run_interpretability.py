@@ -95,7 +95,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--model",
-        default="data/models/CORE_LIP_IDPFold2/core_lip.pt",
+        default="data/models/CORE_LIP_IDPFold2/bindCORE.pt",
         help="Path to the trained checkpoint.",
     )
     parser.add_argument(

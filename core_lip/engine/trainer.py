@@ -84,7 +84,7 @@ class CORE_LIP_Trainer:
 
         # Paths
         self.config_dir = os.path.dirname(os.path.abspath(config_path))
-        self.model_save_path = os.path.join(self.config_dir, "core_lip.pt")
+        self.model_save_path = os.path.join(self.config_dir, "bindCORE.pt")
 
         set_seed(self.train_cfg.seed)
 
