@@ -14,6 +14,7 @@ import copy
 import os
 import tempfile
 from pathlib import Path
+import numpy as np
 from typing import Any
 
 import yaml
