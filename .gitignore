@@ -9,3 +9,6 @@ ray_results/*
 *.png
 *.log
 *.csv
+scripts/analyse_generated_ensemble_coarse_grained.py
+results_cg/*
+results_ensemble/*
