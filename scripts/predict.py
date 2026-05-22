@@ -1,12 +1,12 @@
 """
 CORE-LIP — Step 4: Make predictions
 =====================================
-Thin CLI wrapper around core_lip.predictor.
+Thin CLI wrapper around bindcore.predictor.
 
 Usage
 -----
     python scripts/predict.py \
-        --model      data/models/core_lip.pt \
+        --model      data/models/bindcore.pt \
         --h5         data/protein_MD_properties.h5 \
         --datasets   data/CLIP_dataset/TE440_reduced.txt \
                      data/CLIP_dataset/TR1000_reduced.txt \
@@ -21,7 +21,7 @@ from pathlib import Path
 import h5py
 import torch
 
-from core_lip.engine.predictor import load_checkpoint, predict_dataset
+from bindcore.engine.predictor import load_checkpoint, predict_dataset
 
 
 def main() -> None:
@@ -42,7 +42,7 @@ def main() -> None:
     with h5py.File(args.h5, "r") as h5_features:
         for dataset_path in args.datasets:
             stem = Path(dataset_path).stem
-            output_filepath = str(Path(args.output_dir) / f"core_lip_{stem}.csv")
+            output_filepath = str(Path(args.output_dir) / f"bindcore_{stem}.csv")
             print(f"\nRunning inference on: {dataset_path}")
             predict_dataset(
                 dataset_path=dataset_path,

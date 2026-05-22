@@ -14,10 +14,10 @@ import yaml
 from torch import nn
 from torch.utils.data import DataLoader
 
-from core_lip.data.datasets import ProteinDataset, collate_proteins
-from core_lip.data.io import prepare_data, read_protein_data
-from core_lip.engine.interpretability import AttributionResult, REGISTRY
-from core_lip.engine.predictor import load_checkpoint
+from bindcore.data.datasets import ProteinDataset, collate_proteins
+from bindcore.data.io import prepare_data, read_protein_data
+from bindcore.engine.interpretability import AttributionResult, REGISTRY
+from bindcore.engine.predictor import load_checkpoint
 
 
 def run_all(
@@ -95,12 +95,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--model",
-        default="data/models/CORE_LIP_IDPFold2/bindCORE.pt",
+        default="data/models/bindcore_IDPFold2/bindCORE.pt",
         help="Path to the trained checkpoint.",
     )
     parser.add_argument(
         "--config",
-        default="data/models/CORE_LIP_IDPFold2/config.yaml",
+        default="data/models/bindcore_IDPFold2/config.yaml",
         help="Path to the training/config YAML used to recover feature names.",
     )
     parser.add_argument(

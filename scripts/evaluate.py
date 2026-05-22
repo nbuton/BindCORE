@@ -9,7 +9,7 @@ Usage
 -----
     python scripts/evaluate.py \
         --test_truth  data/CLIP_dataset/TE440_max_1024.txt \
-        --pred_files  data/predictions/core_lip_TE440.csv \
+        --pred_files  data/predictions/bindcore_TE440.csv \
                       data/predictions/clip_TE440.csv \
                       data/predictions/idplip_TE440.csv \
         --names       CORE-LIP CLIP IDP-LIP \
@@ -35,9 +35,9 @@ from sklearn.metrics import (
     roc_auc_score,
 )
 
-from core_lip.data.io import parse_prediction_csv, parse_truth_file
-from core_lip.eval.plotting import plot_metrics_bar, plot_pr_curves, plot_roc_curves
-from core_lip.eval.structures import ResidueExample
+from bindcore.data.io import parse_prediction_csv, parse_truth_file
+from bindcore.eval.plotting import plot_metrics_bar, plot_pr_curves, plot_roc_curves
+from bindcore.eval.structures import ResidueExample
 
 # ---------------------------------------------------------------------------
 # Residue-level metrics

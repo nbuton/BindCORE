@@ -1,5 +1,5 @@
 """
-core_lip/predictor.py
+bindcore/predictor.py
 ---------------------
 Reusable inference logic.
 
@@ -17,9 +17,9 @@ import pandas as pd
 import torch
 from torch.utils.data import DataLoader
 
-from core_lip.data.datasets import ProteinDataset, collate_proteins
-from core_lip.data.io import prepare_data, read_protein_data
-from core_lip.modeling.protein_multi_scale_transformer import (
+from bindcore.data.datasets import ProteinDataset, collate_proteins
+from bindcore.data.io import prepare_data, read_protein_data
+from bindcore.modeling.protein_multi_scale_transformer import (
     ProteinMultiScaleTransformer,
 )
 

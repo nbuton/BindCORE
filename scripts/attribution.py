@@ -47,9 +47,9 @@ import torch.nn as nn
 from captum.attr import DeepLiftShap
 from torch.utils.data import DataLoader
 
-from core_lip.data.datasets import ProteinDataset, collate_proteins
-from core_lip.data.io import prepare_data, read_protein_data
-from core_lip.engine.predictor import load_checkpoint
+from bindcore.data.datasets import ProteinDataset, collate_proteins
+from bindcore.data.io import prepare_data, read_protein_data
+from bindcore.engine.predictor import load_checkpoint
 
 # ============================================================================
 # 1. Model wrapper

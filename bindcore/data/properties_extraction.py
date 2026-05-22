@@ -1,5 +1,5 @@
 """
-core_lip/data/conformation.py
+bindcore/data/conformation.py
 ----------------------------
 Logic for processing molecular dynamics trajectories and extracting features.
 """

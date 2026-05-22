@@ -1,5 +1,5 @@
 """
-core_lip/plotting.py
+bindcore/plotting.py
 --------------------
 Publication-ready matplotlib figures for residue-level LIP evaluation.
 
@@ -24,7 +24,7 @@ from sklearn.metrics import (
     roc_curve,
 )
 
-from core_lip.eval.structures import ResidueExample
+from bindcore.eval.structures import ResidueExample
 
 # ---------------------------------------------------------------------------
 # Shared colour palette

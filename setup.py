@@ -4,7 +4,7 @@ setup(
     name="core-lip",
     version="0.1.0",
     description="COformational Representation Ensemble for LIP prediction",
-    packages=["core_lip"],  # The actual folder name
+    packages=["bindcore"],  # The actual folder name
     python_requires=">=3.10",
     install_requires=[
         "torch>=2.0",

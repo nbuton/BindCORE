@@ -1,5 +1,5 @@
 """
-core_lip/eval/structures.py
+bindcore/eval/structures.py
 ---------------------------
 Data structures for residue-level evaluation tracking.
 """

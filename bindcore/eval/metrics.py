@@ -1,5 +1,5 @@
 """
-core_lip/metrics.py
+bindcore/metrics.py
 -------------------
 Model evaluation and diagnostic utilities.
 

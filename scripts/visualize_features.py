@@ -24,8 +24,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from scipy import stats
 
-from core_lip.utils import read_protein_data
-
+from bindcore.utils import read_protein_data
 
 # ---------------------------------------------------------------------------
 # Feature groups

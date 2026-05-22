@@ -4,7 +4,7 @@ import os
 import copy
 import yaml
 from pathlib import Path
-from core_lip.engine.trainer import CORE_LIP_Trainer, get_config
+from bindcore.engine.trainer import bindcore_Trainer, get_config
 
 # Ensure FullConfig is imported from your definitions
 # from your_config_module import FullConfig
@@ -60,7 +60,7 @@ def main() -> None:
 
             try:
                 # Initialize and run
-                trainer = CORE_LIP_Trainer(
+                trainer = bindcore_Trainer(
                     run_cfg, args.config, device=args.device, threshold_selection=False
                 )
                 best_auc = trainer.run()

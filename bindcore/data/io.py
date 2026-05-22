@@ -1,5 +1,5 @@
 """
-core_lip/data/io.py
+bindcore/data/io.py
 -------------------
 Data preparation, parsing, feature extraction, and I/O utilities.
 """
@@ -20,8 +20,8 @@ import torch
 from sklearn.preprocessing import StandardScaler
 
 # Adjust this import based on your exact structure
-from core_lip.data.datasets import AA_TO_INT, ProteinDataset
-from core_lip.eval.structures import ResidueExample
+from bindcore.data.datasets import AA_TO_INT, ProteinDataset
+from bindcore.eval.structures import ResidueExample
 
 # Allow reading large CSV fields for massive protein sequences
 csv.field_size_limit(sys.maxsize)

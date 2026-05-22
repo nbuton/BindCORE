@@ -1,5 +1,5 @@
 """
-core_lip/trainer.py
+bindcore/trainer.py
 -------------------
 Low-level training primitives and small helpers.
 
@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import math
 import os
+
 os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
 import random
 
@@ -27,18 +28,18 @@ from torch.utils.data import DataLoader, Subset
 from torch.optim.lr_scheduler import SequentialLR, LinearLR, CosineAnnealingLR
 from popriskmin import PRM
 
-from core_lip.config import FullConfig
-from core_lip.data.datasets import ProteinDataset, collate_proteins
-from core_lip.data.io import (
+from bindcore.config import FullConfig
+from bindcore.data.datasets import ProteinDataset, collate_proteins
+from bindcore.data.io import (
     cluster_sequences_mmseqs2,
     get_all_feature_stats,
     ham_mask_val_labels,
     prepare_data,
     read_protein_data,
 )
-from core_lip.eval.metrics import evaluate, select_threshold_cv
-from core_lip.modeling.loss import AUCMarginLoss, FocalLoss, LDAMLoss
-from core_lip.modeling.protein_multi_scale_transformer import (
+from bindcore.eval.metrics import evaluate, select_threshold_cv
+from bindcore.modeling.loss import AUCMarginLoss, FocalLoss, LDAMLoss
+from bindcore.modeling.protein_multi_scale_transformer import (
     ProteinMultiScaleTransformer,
 )
 
@@ -74,7 +75,7 @@ def get_config(yaml_path: str) -> FullConfig:
 # ---------------------------------------------------------------------------
 
 
-class CORE_LIP_Trainer:
+class bindcore_Trainer:
     def __init__(self, cfg, config_path, threshold_selection=True, device="cpu"):
         self.cfg = cfg
         self.train_cfg = cfg.training
@@ -317,19 +318,18 @@ class CORE_LIP_Trainer:
             )
             self.history["train_loss"].append(t_loss)
 
-            
-
             log_str = f"Epoch {epoch:03d} | train_loss={t_loss:.4f}"
 
             if self.val_loader:
-                use_ema_for_eval = (
-                    self.train_cfg.use_ema
-                    and bool(self.ema_shadow)
-                )
+                use_ema_for_eval = self.train_cfg.use_ema and bool(self.ema_shadow)
 
                 if use_ema_for_eval:
                     with torch.no_grad():
-                        raw_state = {n: p.clone() for n, p in self.model.named_parameters() if p.requires_grad}
+                        raw_state = {
+                            n: p.clone()
+                            for n, p in self.model.named_parameters()
+                            if p.requires_grad
+                        }
                     self._apply_ema()
 
                 val_loss, val_roc_auc, val_pr_auc = evaluate(
@@ -375,14 +375,12 @@ class CORE_LIP_Trainer:
             print(f"Final threshold (CV-MCC): {best_thr:.6f}")
 
         # For hyperparameters tunning
-        if len(self.history["val_pr_auc"])!=0:
+        if len(self.history["val_pr_auc"]) != 0:
             peak_epoch = np.argmax(self.history["val_pr_auc"])
             peak_value = self.history["val_pr_auc"][peak_epoch]
 
             # Average of a window around the peak (+/-2 epochs)
-            window = self.history["val_pr_auc"][
-                max(0, peak_epoch - 2) : peak_epoch + 3
-            ]
+            window = self.history["val_pr_auc"][max(0, peak_epoch - 2) : peak_epoch + 3]
             sustained_peak = np.mean(window)
 
             # Penalize peaks that happen in the first 20% of training
@@ -409,7 +407,6 @@ class CORE_LIP_Trainer:
         plt.savefig("data/last_training_fig.png")
         plt.show()
 
-
     @torch.no_grad()
     def _ema_update(self):
         decay = self.train_cfg.ema_decay
@@ -427,8 +424,8 @@ class CORE_LIP_Trainer:
             if name in self.ema_shadow:
                 p.copy_(self.ema_shadow[name])
 
-
-    def train_one_epoch(self,
+    def train_one_epoch(
+        self,
         model: torch.nn.Module,
         loader,
         optimizer: torch.optim.Optimizer,
@@ -491,9 +488,13 @@ class CORE_LIP_Trainer:
             loss.backward()
 
             if (batch_idx + 1) % accumulation_steps == 0:
-                grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+                grad_norm = torch.nn.utils.clip_grad_norm_(
+                    model.parameters(), grad_clip
+                )
                 if not torch.isfinite(grad_norm):
-                    raise RuntimeError(f"Non-finite gradient norm at batch {batch_idx}.")
+                    raise RuntimeError(
+                        f"Non-finite gradient norm at batch {batch_idx}."
+                    )
 
                 optimizer.step()
                 optimizer.zero_grad(set_to_none=True)

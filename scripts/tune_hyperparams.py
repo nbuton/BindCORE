@@ -26,8 +26,7 @@ from ray.tune import RunConfig
 from ray.tune.search.optuna import OptunaSearch
 
 # -- Your project -------------------------------------------------------------
-from core_lip.engine.trainer import CORE_LIP_Trainer, get_config
-
+from bindcore.engine.trainer import bindcore_Trainer, get_config
 
 # -----------------------------------------------------------------------------
 # Preset look-up tables
@@ -37,7 +36,13 @@ FEATURE_SETS: dict[str, list[str]] = {
     "scalar_only": ["scalar_features"],
     "scalar_local": ["scalar_features", "local_features"],
     "scalar_local_pairwise": ["scalar_features", "local_features", "pairwise_features"],
-    "all": ["token_embedding","positional_embeddings", "scalar_features", "local_features", "pairwise_features"],
+    "all": [
+        "token_embedding",
+        "positional_embeddings",
+        "scalar_features",
+        "local_features",
+        "pairwise_features",
+    ],
 }
 
 DILATION_PRESETS: dict[str, list[int]] = {
@@ -62,7 +67,6 @@ PARAM_TO_CONFIG: dict[str, tuple[str, str | list[str]]] = {
     "scheduler_type": ("training", "scheduler_type"),
     "loss_type": ("training", "loss_type"),
     "loss_params": ("training", "loss_params"),
-    
     # model
     "embed_dim": ("model", "embed_dim"),
     "num_blocks": ("model", "num_blocks"),
@@ -71,12 +75,10 @@ PARAM_TO_CONFIG: dict[str, tuple[str, str | list[str]]] = {
     "dropout": ("model", "dropout"),
     "share_block_weights": ("model", "share_block_weights"),
     "activate_classical_attention": ("model", "activate_classical_attention"),
-    
     # MLP hidden mapping
     "mlp_hidden": ("model", ["local_mlp_hidden", "scalar_mlp_hidden"]),
     "local_mlp_hidden": ("model", "local_mlp_hidden"),
     "scalar_mlp_hidden": ("model", "scalar_mlp_hidden"),
-    
     "inputs_features": ("model", "inputs_features"),  # expanded via FEATURE_SETS
     "activate_pairwise_bias": ("model", "activate_pairwise_bias"),
     "pairwise_cnn_channels": ("model", "pairwise_cnn_channels"),
@@ -273,6 +275,7 @@ def _is_fixed(dist: Any) -> bool:
 # Trainable (one trial)
 # -----------------------------------------------------------------------------
 
+
 def trainable(
     trial_params: dict[str, Any],
     *,
@@ -280,7 +283,7 @@ def trainable(
     search_space_path: str,
     device: str,
     max_epochs: int,
-    num_seeds: int = 1,  
+    num_seeds: int = 1,
 ) -> None:
     """Called by Ray Tune for every trial."""
     cfg = build_config_from_trial(trial_params, static_cfg)
@@ -289,18 +292,16 @@ def trainable(
     scores = []
     base_seed = cfg.get("training", {}).get("seed", 42)
 
-    for i in range(num_seeds):                          
-        cfg["training"]["seed"] = base_seed + i       
+    for i in range(num_seeds):
+        cfg["training"]["seed"] = base_seed + i
 
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".yaml", delete=False
-        ) as tmp:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as tmp:
             yaml.safe_dump(cfg, tmp)
             tmp_path = tmp.name
 
         try:
             loaded_cfg = get_config(tmp_path)
-            trainer = CORE_LIP_Trainer(
+            trainer = bindcore_Trainer(
                 loaded_cfg,
                 search_space_path,
                 threshold_selection=False,
@@ -388,7 +389,7 @@ def main() -> None:
         search_space_path=str(search_space_path),
         device=args.device,
         max_epochs=args.max_epochs,
-        num_seeds=2,            
+        num_seeds=2,
     )
 
     tuner = tune.Tuner(
@@ -430,7 +431,7 @@ def main() -> None:
     # -- Final retrain --------------------------------------------------------
     print("\nRetraining final model with best hyperparameters ...")
     loaded_best_cfg = get_config(str(best_cfg_path))
-    final_trainer = CORE_LIP_Trainer(
+    final_trainer = bindcore_Trainer(
         loaded_best_cfg, str(best_cfg_path), device=args.device
     )
     final_auc = final_trainer.run()

@@ -4,12 +4,12 @@ from pathlib import Path
 import h5py
 from tqdm import tqdm
 
-from core_lip.plm_embedding.embedding_lib import (
+from bindcore.plm_embedding.embedding_lib import (
     EmbeddingManager,
     init_worker,
     process_sequence_task,
 )
-from core_lip.plm_embedding.utils import get_model_wrapper
+from bindcore.plm_embedding.utils import get_model_wrapper
 
 
 def main():

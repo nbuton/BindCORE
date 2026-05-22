@@ -1,8 +1,8 @@
-# CORE-LIP
+# BindCORE
 
 **CO**nformational **R**epresentation **E**nsemble for **L**inear **I**nteraction **P**eptide prediction
 
-CORE-LIP predicts LIP propensity from an ensemble of protein conformations.
+BindCORE predicts LIP propensity from an ensemble of protein conformations.
 It takes full atom ensemble of conformation as input, computes
 structural and dynamical features, and feeds them into a multi-scale Transformer
 (`ProteinMultiScaleTransformer`) that jointly exploits sequence, per-residue local,
@@ -13,8 +13,8 @@ global scalar, and pairwise conformational signals.
 ## Project layout
 
 ```
-CORE-LIP/
-├── core_lip/                         # Core Library
+BindCORE/
+├── bindcore/                         # Core Library
 │   ├── config.py                     # Pydantic configuration schemas
 │   ├── data/                         # Data handling & Pre-processing
 │   │   ├── datasets.py               # PyTorch Dataset & Collation
@@ -56,16 +56,16 @@ CORE-LIP/
 ## Installation
 
 ```bash
-git clone https://github.com/nbuton/CORE-LIP
+git clone https://github.com/nbuton/BindCORE
 pip install -r requirements.txt
-pip install -e .          # installs core_lip as an editable package
+pip install -e .          # installs bindcore as an editable package
 ```
 
 ---
 
-##  Using CORE-LIP as a Prediction Tool
+##  Using BindCORE as a Prediction Tool
 
-We provide two ways to run CORE-LIP: a "zero-setup" cloud version and a high-throughput local version.
+We provide two ways to run BindCORE: a "zero-setup" cloud version and a high-throughput local version.
 
 ### Option A: Google Colab (Recommended for single sequences)
 For a quick prediction without local installation, use our managed notebook. It handles environment setup and dependencies automatically.
@@ -78,7 +78,7 @@ For a quick prediction without local installation, use our managed notebook. It 
 Use this for large-scale datasets or custom workflows. This pipeline requires pre-generated conformational ensembles.
 
 #### 1. Generate Conformational Ensembles
-CORE-LIP predicts based on structural dynamics. You must first generate full-atom ensembles:
+BindCORE predicts based on structural dynamics. You must first generate full-atom ensembles:
 * **Fold:** Generate coarse-grained ensembles using [IDPFold2](https://github.com/Junjie-Zhu/IDPFold2).
 * **Backmap:** Convert to full-atom resolution using `cg2all` (refer to the script in the IDPFold2 repository).
 * **Organize:** Place the output in `data/conformational_ensemble/IDPFold2/`. 
@@ -96,7 +96,7 @@ Once your ensembles are ready, run the unified production script. This script ha
 
 ```bash
 python scripts/train.py \
-    --config  data/models/CORE_LIP_IDPFold2/config.yaml \
+    --config  data/models/bindcore_IDPFold2/config.yaml \
     --device cuda
 ```
 
@@ -134,7 +134,7 @@ This create a violin plot with all the features with the name results/{dataset_s
 
 ```bash
 python scripts/train.py \
-    --config  data/models/CORE_LIP_IDPFold2/config.yaml \
+    --config  data/models/bindcore_IDPFold2/config.yaml \
     --device mps
 ```
 
@@ -142,7 +142,7 @@ python scripts/train.py \
 
 ```bash
 ─ python scripts/predict.py \
-    --model     data/models/CORE_LIP_IDPFold2/core_lip.pt \
+    --model     data/models/bindcore_IDPFold2/bindcore.pt \
     --h5        data/properties/IDPFold2_derived_properties.h5 \
     --datasets  data/CLIP_dataset/TE440_less_than_1024.txt \
     --output_dir data/predictions/
@@ -153,10 +153,10 @@ python scripts/train.py \
 ```bash
 python scripts/evaluate.py \
     --test_truth  data/CLIP_dataset/TE440_less_than_1024.txt \
-    --pred_files  data/predictions/core_lip_TE440_less_than_1024.csv \
+    --pred_files  data/predictions/bindcore_TE440_less_than_1024.csv \
                   data/predictions/CLIP_TE440.csv \
                   data/predictions/MoRFchibi_TE440.csv \
-    --names       "CORE-LIP IDPFold2" "CLIP" "MoRFchibi V2.0" \
+    --names       "BindCORE IDPFold2" "CLIP" "MoRFchibi V2.0" \
     --output_dir  results/
 ```
 
@@ -164,8 +164,8 @@ python scripts/evaluate.py \
 
 ```bash
 python scripts/run_interpretability.py \
-  --model data/models/CORE_LIP_IDPFold2/core_lip.pt \
-  --config data/models/CORE_LIP_IDPFold2/config.yaml \
+  --model data/models/bindcore_IDPFold2/bindcore.pt \
+  --config data/models/bindcore_IDPFold2/config.yaml \
   --h5 data/properties/IDPFold2_derived_properties.h5 \
   --plm-h5 data/embeddings/esm3-large-2024-03_merged.h5 \
   --datasets data/CLIP_dataset/TR1000_in_h5.txt \

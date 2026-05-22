@@ -1,5 +1,5 @@
 """
-core_lip/datasets.py
+bindcore/datasets.py
 ====================
 Dataset classes and collation utilities for training, validation, and
 inference.

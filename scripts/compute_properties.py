@@ -3,7 +3,7 @@ import logging
 import concurrent.futures
 from pathlib import Path
 <<<<<<< HEAD
-from core_lip.data.properties_extraction import save_properties_to_h5
+from bindcore.data.properties_extraction import save_properties_to_h5
 import mdtraj as md
 from tqdm import tqdm
 
@@ -53,7 +53,7 @@ def process_single_protein(
 import h5py
 from tqdm import tqdm
 
-from core_lip.data.properties_extraction import (
+from bindcore.data.properties_extraction import (
     process_single_protein,
     save_properties_to_h5,
 )

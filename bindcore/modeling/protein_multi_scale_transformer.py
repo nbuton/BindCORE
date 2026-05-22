@@ -21,7 +21,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from core_lip.config import ProteinModelConfig
+from bindcore.config import ProteinModelConfig
 
 # ---------------------------------------------------------------------------
 # 1.  Small reusable primitives
