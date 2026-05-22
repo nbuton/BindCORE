@@ -11,3 +11,5 @@ mmseqs/*
 core_lip/**
 *.log
 figures/*
+results_cg/*
+results_ensemble/*
