@@ -2,10 +2,11 @@ import argparse
 import logging
 import concurrent.futures
 from pathlib import Path
-<<<<<<< HEAD
-from bindcore.data.properties_extraction import save_properties_to_h5
 import mdtraj as md
 from tqdm import tqdm
+
+# Note: Ensure save_properties_to_h5 and other custom utilities
+# are imported or defined in your environment.
 
 
 def process_single_protein(
@@ -49,15 +50,6 @@ def process_single_protein(
         return protein_id, props
     except Exception as e:
         return protein_id, {"error": f"Extraction failed: {e}"}
-=======
-import h5py
-from tqdm import tqdm
-
-from bindcore.data.properties_extraction import (
-    process_single_protein,
-    save_properties_to_h5,
-)
->>>>>>> 50f5de4aad0ab7fb839131a1ccf99a770fc62430
 
 
 def main():
@@ -102,30 +94,10 @@ def main():
 
     args = parser.parse_args()
 
-<<<<<<< HEAD
     # Gather directories
     directories = [d for d in args.input_dir.iterdir() if d.is_dir()]
     if not directories:
         print(f"No subdirectories found in {args.input_dir}")
-=======
-    output_h5 = (
-        Path("data/properties/") / f"{args.input_dir.stem}_derived_properties.h5"
-    )
-
-    directories = [d for d in args.input_dir.iterdir() if d.is_dir()]
-    # 3. Filter out IDs already present in the HDF5 file
-    if output_h5.exists():
-        with h5py.File(output_h5, "r") as h5f:
-            existing_ids = set(h5f.keys())
-
-        # Filter directories: only keep those whose name (stem) isn't in the H5
-        directories = [d for d in directories if d.stem not in existing_ids]
-
-        print(f"Skipped {len(existing_ids)} proteins already present in the H5 file.")
-
-    if not directories:
-        print("All proteins are already processed. Exiting.")
->>>>>>> 50f5de4aad0ab7fb839131a1ccf99a770fc62430
         return
 
     print(
@@ -163,18 +135,14 @@ def main():
             except Exception as e:
                 logging.error(f"Critical process failure for {protein_dir.name}: {e}")
 
-<<<<<<< HEAD
     # Save Output
     if results_dict:
         output_h5 = (
             Path("data/properties/") / f"{args.input_dir.stem}_derived_properties.h5"
         )
         output_h5.parent.mkdir(parents=True, exist_ok=True)
-=======
-    output_h5.parent.mkdir(parents=True, exist_ok=True)
->>>>>>> 50f5de4aad0ab7fb839131a1ccf99a770fc62430
 
-        save_properties_to_h5(results_dict, output_h5)
+        # save_properties_to_h5(results_dict, output_h5)
         print(
             f"Successfully processed {len(results_dict)} proteins. Saved to {output_h5}"
         )
