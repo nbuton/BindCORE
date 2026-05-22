@@ -4,7 +4,10 @@ import concurrent.futures
 from pathlib import Path
 from tqdm import tqdm
 
-from bindcore.data.properties_extraction import process_single_protein
+from bindcore.data.properties_extraction import (
+    process_single_protein,
+    save_properties_to_h5,
+)
 
 
 def main():
@@ -97,7 +100,7 @@ def main():
         )
         output_h5.parent.mkdir(parents=True, exist_ok=True)
 
-        # save_properties_to_h5(results_dict, output_h5)
+        save_properties_to_h5(results_dict, output_h5)
         print(
             f"Successfully processed {len(results_dict)} proteins. Saved to {output_h5}"
         )

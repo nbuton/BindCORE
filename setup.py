@@ -5,7 +5,7 @@ setup(
     version="0.1.0",
     description="COformational Representation Ensemble for LIP prediction",
     packages=["bindcore"],  # The actual folder name
-    python_requires=">=3.10",
+    python_requires=">=3.9",
     install_requires=[
         "torch>=2.0",
         "numpy>=1.24",

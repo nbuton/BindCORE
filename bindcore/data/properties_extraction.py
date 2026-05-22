@@ -11,7 +11,8 @@ import shutil
 import logging
 import warnings
 from pathlib import Path
-
+from typing import Union
+from pathlib import Path
 import h5py
 import mdtraj as md
 import numpy as np
@@ -102,7 +103,7 @@ def process_single_protein(
 
     # 3. Compute properties using your ProteinAnalyzer
     try:
-        analyzer = ProteinAnalyzer(str(pdb_path), str(xtc_path))
+        analyzer = ProteinAnalyzer(pdb_path, xtc_path)
         properties = analyzer.compute_all(
             sasa_n_sphere=1600,
             contact_cutoff=8.0,
@@ -118,7 +119,9 @@ def process_single_protein(
         return protein_id, {"error": f"Extraction failed: {str(e)}"}
 
 
-def save_properties_to_h5(dico_properties: dict, output_filepath: str | Path) -> None:
+def save_properties_to_h5(
+    dico_properties: dict, output_filepath: Union[str, Path]
+) -> None:
     """
     Saves or updates nested feature dictionary to an HDF5 file.
     If the file exists, it adds new keys or updates existing ones.
