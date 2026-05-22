@@ -68,7 +68,9 @@ def convert_trajectory_format(folder_path: Path) -> None:
             traj.save_xtc(str(new_xtc))
 
 
-def process_single_protein(protein_dir: Path) -> tuple[str, dict]:
+def process_single_protein(
+    protein_dir: Path, pdb_name="top_AA.pdb", xtc_name="traj_AA.xtc"
+) -> tuple[str, dict]:
     """
     Worker function: Handles conversion and feature extraction for one protein.
     Returns (protein_id, feature_dict).
@@ -80,8 +82,8 @@ def process_single_protein(protein_dir: Path) -> tuple[str, dict]:
     if not traj_path_xtc.exists():
         convert_trajectory_format(protein_dir)
 
-    pdb_path = protein_dir / "top_AA.pdb"
-    xtc_path = protein_dir / "traj_AA.xtc"
+    pdb_path = protein_dir / pdb_name
+    xtc_path = protein_dir / xtc_name
 
     if not xtc_path.exists():
         raise FileNotFoundError(f"Missing trajectory for {protein_id}")

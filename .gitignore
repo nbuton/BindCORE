@@ -7,3 +7,5 @@ scripts/__pycache__/**
 core_lip/**/__pycache__/**
 scripts/tune_hyperparams.py
 ray_results/*
+env_CORE_LIP/**
+mmseqs/*
