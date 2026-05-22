@@ -25,11 +25,12 @@ class ProteinModelConfig(BaseModel):
     # ── Embedding / model width ───────────────────────────────────────────
     embed_dim: int = 128
     max_seq_len: int = 1024
-    window_size_pairwise_input: int = 1024
     activate_pairwise_bias: bool = True
+    activate_classical_attention: bool = True
 
     # ── Transformer blocks ────────────────────────────────────────────────
     num_blocks: int = 4
+    share_block_weights: bool = False
     num_heads: int = 8
     ffn_expansion: int = 2
     dropout: float = 0.1
@@ -71,14 +72,21 @@ class TrainingConfig(BaseModel):
     epochs: int
     batch_size: int
     accumulation: int
+    scheduler_type: str
+    optimizer: str
     loss_type: str
     loss_params: Dict[str, Any] = {}
     val_prop: float
     lr: float
     weight_decay: float
     seed: int
+    use_ema: bool = False
+    ema_decay: float = 0.999
     h5_properties: Path
     training_dataset: Path
+    SCALAR_FEATURES: List
+    LOCAL_FEATURES: List
+    PAIRWISE_FEATURES: List
 
 
 # You can now hook this up to your main config just like before:

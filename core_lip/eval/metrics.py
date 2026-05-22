@@ -22,7 +22,6 @@ from sklearn.model_selection import KFold
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-
 # ---------------------------------------------------------------------------
 # Evaluation
 # ---------------------------------------------------------------------------
@@ -63,8 +62,14 @@ def evaluate(
         logits = model(tokens, x_scalar, x_local, x_pairwise, mask, plm_pad)
         logits = logits.squeeze(-1)  # [batch, length]
 
-        loss_raw = criterion(logits, y.float())
-        loss = (loss_raw * mask).sum() / mask.sum()
+        y_clean = y.clone().float()
+        y_clean[y == -1] = 0.0
+
+        loss_raw = criterion(logits, y_clean)
+        valid_label_mask = (y != -1).float()
+        combined_mask = mask * valid_label_mask
+
+        loss = (loss_raw * combined_mask).sum() / (combined_mask.sum() + 1e-8)
         if not torch.isfinite(loss):
             raise RuntimeError("Non-finite validation loss.")
 
@@ -81,6 +86,11 @@ def evaluate(
     y_true = torch.cat(y_true_all).numpy()
     y_score = torch.cat(y_score_all).numpy()
     y_prob = torch.sigmoid(torch.from_numpy(y_score)).numpy()
+
+    y_mask = y_true != -1
+    y_true = y_true[y_mask]
+    y_score = y_score[y_mask]
+    y_prob = y_prob[y_mask]
 
     try:
         roc_auc = float(roc_auc_score(y_true, y_prob))

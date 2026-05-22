@@ -156,9 +156,22 @@ python scripts/evaluate.py \
     --pred_files  data/predictions/core_lip_TE440_less_than_1024.csv \
                   data/predictions/CLIP_TE440.csv \
                   data/predictions/MoRFchibi_TE440.csv \
-    --names       "CORE-LIP IDPFold2 v1" "CLIP" "MoRFchibi V2.0" \
+    --names       "CORE-LIP IDPFold2" "CLIP" "MoRFchibi V2.0" \
     --output_dir  results/
 ```
+
+### 6 - Interpretability
+
+```bash
+python scripts/run_interpretability.py \
+  --model data/models/CORE_LIP_IDPFold2/core_lip.pt \
+  --config data/models/CORE_LIP_IDPFold2/config.yaml \
+  --h5 data/properties/IDPFold2_derived_properties.h5 \
+  --plm-h5 data/embeddings/esm3-large-2024-03_merged.h5 \
+  --datasets data/CLIP_dataset/TR1000_in_h5.txt \
+  --output-dir data/interpretability/
+```
+
 
 ---
 

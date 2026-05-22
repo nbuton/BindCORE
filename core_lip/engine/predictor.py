@@ -23,7 +23,6 @@ from core_lip.modeling.protein_multi_scale_transformer import (
     ProteinMultiScaleTransformer,
 )
 
-
 # ---------------------------------------------------------------------------
 # Checkpoint loading
 # ---------------------------------------------------------------------------
@@ -104,7 +103,7 @@ def predict_dataset(
         X_pairwise,
         seqs,
         ids=ids,
-        plm_h5_path="data/embeddings/esm3-large-2024-03_merged.h5",
+        # plm_h5_path="data/embeddings/esm3-large-2024-03_merged.h5",
     )
     loader = DataLoader(
         dataset,
@@ -161,7 +160,7 @@ def predict_dataset(
                 {
                     "protein_id": prot_id,
                     "length": len(valid_probs),
-                    "predictions": ",".join(f"{p:.6f}" for p in valid_probs.tolist()),
+                    "predictions": ",".join(f"{p:.8f}" for p in valid_probs.tolist()),
                     "binary_predictions": ",".join(map(str, binary.tolist())),
                 }
             )

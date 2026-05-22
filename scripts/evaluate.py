@@ -19,6 +19,7 @@ Usage
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 from pathlib import Path
 from typing import Dict, List
 
@@ -70,14 +71,21 @@ def compute_residue_metrics(
             f"Model '{model_name}' is missing predictions for "
             f"{len(missing)} protein(s): {missing[:5]}{'...' if len(missing) > 5 else ''}"
         )
-
     y_true = np.concatenate([r.y_true.astype(np.int8) for r in records.values()])
-    y_score = np.concatenate(
-        [r.scores[model_name].astype(np.float64) for r in records.values()]
+    count = Counter(y_true)
+    print(
+        f"There are {count[-1]} residues with an unknown label, these will be ignore for eval"
     )
+    y_mask = y_true != -1
+    y_true = y_true[y_mask]
+    y_score = np.concatenate(
+        [r.scores[model_name].astype(np.float32) for r in records.values()]
+    )
+    y_score = y_score[y_mask]
     y_pred = np.concatenate(
         [r.binary[model_name].astype(np.int8) for r in records.values()]
     )
+    y_pred = y_pred[y_mask]
 
     if len(y_true) == 0:
         raise ValueError(f"No residue-level predictions found for model '{model_name}'")
@@ -229,17 +237,20 @@ def main():
         title="ROC Curves - LIP Test Set (residue level)",
         save_path=output_dir / "roc_curves.pdf",
     )
+    plt.savefig("data/ROC_curve.png")
     plot_pr_curves(
         test_records,
         model_names,
         title="Precision-Recall Curves - LIP Test Set (residue level)",
         save_path=output_dir / "pr_curves.pdf",
     )
+    plt.savefig("data/Precision_Recall_curve.png")
     plot_metrics_bar(
         all_results,
         title="Model Performance - LIP Test Set (residue level)",
         save_path=output_dir / "metrics_bar.pdf",
     )
+    plt.savefig("data/bar_plot.png")
     plt.show()
 
 

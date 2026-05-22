@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import math
 import os
+os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
 import random
 
 import h5py
@@ -23,13 +24,15 @@ import yaml
 from tqdm import tqdm
 import pandas as pd
 from torch.utils.data import DataLoader, Subset
+from torch.optim.lr_scheduler import SequentialLR, LinearLR, CosineAnnealingLR
+from popriskmin import PRM
 
 from core_lip.config import FullConfig
 from core_lip.data.datasets import ProteinDataset, collate_proteins
-from core_lip.data.features import LOCAL_FEATURES, PAIRWISE_FEATURES, SCALAR_FEATURES
 from core_lip.data.io import (
     cluster_sequences_mmseqs2,
     get_all_feature_stats,
+    ham_mask_val_labels,
     prepare_data,
     read_protein_data,
 )
@@ -38,7 +41,6 @@ from core_lip.modeling.loss import AUCMarginLoss, FocalLoss, LDAMLoss
 from core_lip.modeling.protein_multi_scale_transformer import (
     ProteinMultiScaleTransformer,
 )
-
 
 # ---------------------------------------------------------------------------
 # Reproducibility
@@ -51,6 +53,9 @@ def set_seed(seed: int = 42) -> None:
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    torch.use_deterministic_algorithms(True)
 
 
 # ---------------------------------------------------------------------------
@@ -79,7 +84,7 @@ class CORE_LIP_Trainer:
 
         # Paths
         self.config_dir = os.path.dirname(os.path.abspath(config_path))
-        self.model_save_path = os.path.join(self.config_dir, "core_lip.pt")
+        self.model_save_path = os.path.join(self.config_dir, "bindCORE.pt")
 
         set_seed(self.train_cfg.seed)
 
@@ -89,14 +94,24 @@ class CORE_LIP_Trainer:
         self.scheduler = None
         self.criterion = None
         self.stats = None
-        self.history = {"train_loss": [], "val_loss": [], "val_auc": []}
+        self.history = {
+            "train_loss": [],
+            "val_loss": [],
+            "val_pr_auc": [],
+            "val_roc_auc": [],
+        }
+        self.ema_shadow = {}
 
     def prepare_loaders(self):
         """Handles data loading and OOD splitting logic."""
         with h5py.File(self.train_cfg.h5_properties, "r") as h5:
             df = read_protein_data(self.train_cfg.training_dataset)
             X_scalar, X_local, X_pairwise, seqs, y_list, ids = prepare_data(
-                df, h5, SCALAR_FEATURES, LOCAL_FEATURES, PAIRWISE_FEATURES
+                df,
+                h5,
+                self.train_cfg.SCALAR_FEATURES,
+                self.train_cfg.LOCAL_FEATURES,
+                self.train_cfg.PAIRWISE_FEATURES,
             )
 
         self.dataset = ProteinDataset(
@@ -125,7 +140,7 @@ class CORE_LIP_Trainer:
         else:
             seq_df = pd.DataFrame({"id": ids, "sequence": seqs})
             cluster_df = cluster_sequences_mmseqs2(
-                seq_df, output_file="data/TR1000_cluster.csv"
+                seq_df, output_file="data/TR1000_cluster.csv", seq_identity=0.3
             )
 
             all_clusters = cluster_df["cluster"].unique()
@@ -143,6 +158,12 @@ class CORE_LIP_Trainer:
 
             print(
                 f"[split] OOD split: {len(train_indices)} train, {len(val_indices)} val proteins."
+            )
+            # HAM-equivalent: mask val residues locally homologous to training sequences
+            ham_mask_val_labels(
+                val_indices=val_indices,
+                train_indices=train_indices,
+                dataset=self.dataset,
             )
 
         loader_kwargs = dict(
@@ -165,9 +186,9 @@ class CORE_LIP_Trainer:
 
     def build_model(self):
         self.model_cfg.num_classes = 1
-        self.model_cfg.nb_scalar = len(SCALAR_FEATURES)
-        self.model_cfg.nb_local = len(LOCAL_FEATURES)
-        self.model_cfg.nb_pairwise = len(PAIRWISE_FEATURES)
+        self.model_cfg.nb_scalar = len(self.train_cfg.SCALAR_FEATURES)
+        self.model_cfg.nb_local = len(self.train_cfg.LOCAL_FEATURES)
+        self.model_cfg.nb_pairwise = len(self.train_cfg.PAIRWISE_FEATURES)
 
         self.model = ProteinMultiScaleTransformer(self.model_cfg, self.stats).to(
             self.device
@@ -177,8 +198,8 @@ class CORE_LIP_Trainer:
         )
 
     def build_criterion(self):
-        total_pos = sum(y.sum() for y in self.y_list)
-        total_neg = sum((1 - np.array(y)).sum() for y in self.y_list)
+        total_pos = sum(y[y != -1].sum() for y in self.y_list)
+        total_neg = sum((1 - np.array(y[y != -1])).sum() for y in self.y_list)
 
         loss_type = self.train_cfg.loss_type
         params = self.train_cfg.loss_params
@@ -193,13 +214,15 @@ class CORE_LIP_Trainer:
             self.criterion = AUCMarginLoss(
                 n_pos=total_pos, n_neg=total_neg, reduction="none", **params
             )
-        elif loss_type == "bce_with_logits":
+        elif loss_type == "bce_with_logits_with_weight":
             pos_weight = torch.tensor(
                 [total_neg / total_pos], device=self.device, dtype=torch.float32
             )
             self.criterion = nn.BCEWithLogitsLoss(
                 pos_weight=pos_weight, reduction="none"
             )
+        elif loss_type == "bce_with_logits":
+            self.criterion = nn.BCEWithLogitsLoss(reduction="none")
         else:
             raise ValueError(f"Unknown loss: {loss_type}")
 
@@ -212,9 +235,9 @@ class CORE_LIP_Trainer:
             "model_state_dict": self.model.state_dict(),
             "cfg": self.model_cfg,
             "stats": self.stats,
-            "scalar_features": SCALAR_FEATURES,
-            "local_features": LOCAL_FEATURES,
-            "pairwise_features": PAIRWISE_FEATURES,
+            "scalar_features": self.train_cfg.SCALAR_FEATURES,
+            "local_features": self.train_cfg.LOCAL_FEATURES,
+            "pairwise_features": self.train_cfg.PAIRWISE_FEATURES,
             "best_val_auc": auc,
         }
         torch.save(save_dict, self.model_save_path)
@@ -226,26 +249,64 @@ class CORE_LIP_Trainer:
         self.build_model()
         self.build_criterion()
 
-        self.optimizer = torch.optim.AdamW(
-            self.model.parameters(),
-            lr=self.train_cfg.lr,
-            weight_decay=self.train_cfg.weight_decay,
-        )
-        self.scheduler = torch.optim.lr_scheduler.OneCycleLR(
-            self.optimizer,
-            max_lr=self.train_cfg.lr,
-            epochs=self.train_cfg.epochs,
-            steps_per_epoch=math.ceil(
-                len(self.train_loader) / self.train_cfg.accumulation
-            ),
-            pct_start=0.1,
-            anneal_strategy="cos",
-        )
+        if self.train_cfg.optimizer == "AdamW":
+            self.optimizer = torch.optim.AdamW(
+                self.model.parameters(),
+                lr=self.train_cfg.lr,
+                weight_decay=self.train_cfg.weight_decay,
+            )
+        elif self.train_cfg.optimizer == "PRM":
+            self.optimizer = PRM(
+                self.model.parameters(),
+                lr=self.train_cfg.lr,
+                weight_decay=self.train_cfg.weight_decay,
+                softness=1.0,
+                warmup_steps=32,
+                rho=0.99,
+            )
+        else:
+            raise ValueError(f"Unknown {self.train_cfg.optimizer} optimizer type")
 
-        best_auc = float("-inf")
+        if self.train_cfg.scheduler_type == "warmup_cosine":
+            # Complexe scheduler
+            total_steps = math.ceil(
+                len(self.train_loader)
+                / self.train_cfg.accumulation
+                * self.train_cfg.epochs
+            )
+            # 1. Warmup for the first 10% of total steps
+            warmup_steps = math.ceil(total_steps * 0.1)
+            warmup_scheduler = LinearLR(
+                self.optimizer,
+                start_factor=0.1,
+                end_factor=1.0,
+                total_iters=warmup_steps,
+            )
+
+            # 2. Cosine decay for the remaining 90%
+            cosine_scheduler = CosineAnnealingLR(
+                self.optimizer, T_max=(total_steps - warmup_steps), eta_min=1e-6
+            )
+
+            # 3. Combine them
+            self.scheduler = SequentialLR(
+                self.optimizer,
+                schedulers=[warmup_scheduler, cosine_scheduler],
+                milestones=[warmup_steps],
+            )
+        elif self.train_cfg.scheduler_type == "no_scheduler":
+            # Dummy scheduler - Eq No
+            self.scheduler = torch.optim.lr_scheduler.LambdaLR(
+                self.optimizer, lr_lambda=lambda step: 1.0
+            )
+        else:
+            raise ValueError(f"Unknown {self.train_cfg.scheduler_type} scheduler type")
+
+        best_pr_auc = float("-inf")
+        best_val_loss = float("inf")
 
         for epoch in range(1, self.train_cfg.epochs + 1):
-            t_loss = train_one_epoch(
+            t_loss = self.train_one_epoch(
                 self.model,
                 self.train_loader,
                 self.optimizer,
@@ -256,36 +317,52 @@ class CORE_LIP_Trainer:
             )
             self.history["train_loss"].append(t_loss)
 
+            
+
             log_str = f"Epoch {epoch:03d} | train_loss={t_loss:.4f}"
 
-            # Only evaluate if val_loader exists
             if self.val_loader:
-                v_loss, v_auc, v_pr = evaluate(
+                use_ema_for_eval = (
+                    self.train_cfg.use_ema
+                    and bool(self.ema_shadow)
+                )
+
+                if use_ema_for_eval:
+                    with torch.no_grad():
+                        raw_state = {n: p.clone() for n, p in self.model.named_parameters() if p.requires_grad}
+                    self._apply_ema()
+
+                val_loss, val_roc_auc, val_pr_auc = evaluate(
                     self.model, self.val_loader, self.criterion, self.device
                 )
-                self.history["val_loss"].append(v_loss)
-                self.history["val_auc"].append(v_auc)
+                self.history["val_loss"].append(val_loss)
+                self.history["val_roc_auc"].append(val_roc_auc)
+                self.history["val_pr_auc"].append(val_pr_auc)
 
-                # Restoration of ROC-AUC and PR-AUC labels
-                log_str += f" | val_loss={v_loss:.4f} | val_ROC-AUC={v_auc:.4f} | val_PR-AUC={v_pr:.4f}"
+                log_str += f" | val_loss={val_loss:.4f} | val_ROC-AUC={val_roc_auc:.4f} | val_PR-AUC={val_pr_auc:.4f}"
                 print(log_str)
 
-                if v_auc > best_auc:
-                    best_auc = v_auc
-                    self.save_checkpoint(auc=best_auc)
+                if val_pr_auc > best_pr_auc:
+                    best_pr_auc = val_pr_auc
+                    best_val_loss = val_loss
+                    self.save_checkpoint(auc=best_pr_auc)
                 else:
-                    # Restoration of the "did not improve" notification
-                    print(
-                        f"  - Validation AUC did not improve, checkpoint not updated."
-                    )
+                    print(f"  - PR-AUC did not improve, checkpoint not updated.")
+
+                if use_ema_for_eval:
+                    with torch.no_grad():
+                        for name, p in self.model.named_parameters():
+                            if name in raw_state:
+                                p.copy_(raw_state[name])
+
             else:
                 print(log_str)
-                # If no validation, save the model at the last epoch
                 if epoch == self.train_cfg.epochs:
+                    if self.train_cfg.use_ema and bool(self.ema_shadow):
+                        self._apply_ema()
                     self.save_checkpoint(is_final=True)
 
         if self.threshold_selection:
-            # Post-training: Threshold selection
             checkpoint = torch.load(
                 self.model_save_path, map_location=self.device, weights_only=False
             )
@@ -296,7 +373,22 @@ class CORE_LIP_Trainer:
             checkpoint["best_threshold"] = best_thr
             torch.save(checkpoint, self.model_save_path)
             print(f"Final threshold (CV-MCC): {best_thr:.6f}")
-        return best_auc
+
+        # For hyperparameters tunning
+        peak_epoch = np.argmax(self.history["val_pr_auc"])
+        peak_value = self.history["val_pr_auc"][peak_epoch]
+
+        # Average of a window around the peak (+/-2 epochs)
+        window = self.history["val_pr_auc"][
+            max(0, peak_epoch - 2) : peak_epoch + 3
+        ]
+        sustained_peak = np.mean(window)
+
+        # Penalize peaks that happen in the first 20% of training
+        total_epochs = len(self.history["val_pr_auc"])
+        earliness_penalty = max(0, 0.2 - peak_epoch / total_epochs) * peak_value
+
+        return sustained_peak - earliness_penalty
 
     def plot(self):
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
@@ -306,71 +398,111 @@ class CORE_LIP_Trainer:
         ax1.set_title("Loss")
         ax1.legend()
 
-        if self.history["val_auc"]:
-            ax2.plot(self.history["val_auc"])
-            ax2.set_title("Validation ROC-AUC")
+        if self.history["val_pr_auc"]:
+            ax2.plot(self.history["val_pr_auc"])
+            ax2.set_title("Validation PR-AUC")
 
         plt.tight_layout()
+        plt.savefig("data/last_training_fig.png")
         plt.show()
 
 
-def train_one_epoch(
-    model: torch.nn.Module,
-    loader,
-    optimizer: torch.optim.Optimizer,
-    scheduler,
-    criterion,
-    accumulation_steps: int,
-    device: torch.device,
-    grad_clip: float = 1.0,
-) -> float:
-    """
-    Run one full training epoch with gradient accumulation.
+    @torch.no_grad()
+    def _ema_update(self):
+        decay = self.train_cfg.ema_decay
+        for name, p in self.model.named_parameters():
+            if not p.requires_grad:
+                continue
+            if name not in self.ema_shadow:
+                self.ema_shadow[name] = p.detach().clone()
+            else:
+                self.ema_shadow[name].mul_(decay).add_(p.detach(), alpha=1.0 - decay)
 
-    Returns
-    -------
-    float
-        Mean training loss over all samples in *loader*.
-    """
-    model.train()
-    total_loss, total = 0.0, 0
-    optimizer.zero_grad(set_to_none=True)
+    @torch.no_grad()
+    def _apply_ema(self):
+        for name, p in self.model.named_parameters():
+            if name in self.ema_shadow:
+                p.copy_(self.ema_shadow[name])
 
-    for batch_idx, (x_scalar, x_local, x_pairwise, seq, mask, y, plm_pad) in tqdm(
-        enumerate(loader), total=len(loader)
-    ):
-        x_scalar = x_scalar.to(device)
-        x_local = x_local.to(device)
-        x_pairwise = x_pairwise.to(device)
-        tokens = seq.long().to(device)
-        mask = mask.to(device)
-        y = y.to(device)
-        if plm_pad is not None:
-            plm_pad = plm_pad.to(device)
 
-        logits = model(tokens, x_scalar, x_local, x_pairwise, mask, plm_pad)
-        logits = logits.squeeze(-1)  # [batch, length]
+    def train_one_epoch(self,
+        model: torch.nn.Module,
+        loader,
+        optimizer: torch.optim.Optimizer,
+        scheduler,
+        criterion,
+        accumulation_steps: int,
+        device: torch.device,
+        grad_clip: float = 1.0,
+    ) -> float:
+        """
+        Run one full training epoch with gradient accumulation.
 
-        if not torch.isfinite(logits).all():
-            raise RuntimeError(f"Non-finite logits at batch {batch_idx}.")
+        Returns
+        -------
+        float
+            Mean training loss over all samples in *loader*.
+        """
+        model.train()
+        total_loss, total = 0.0, 0
+        optimizer.zero_grad(set_to_none=True)
 
-        loss_raw = criterion(logits, y.float())
-        loss = (loss_raw * mask).sum() / mask.sum() / accumulation_steps
-        if not torch.isfinite(loss):
-            raise RuntimeError(f"Non-finite loss at batch {batch_idx}.")
+        for batch_idx, (x_scalar, x_local, x_pairwise, seq, mask, y, plm_pad) in tqdm(
+            enumerate(loader), total=len(loader)
+        ):
+            x_scalar = x_scalar.to(device)
+            x_local = x_local.to(device)
+            x_pairwise = x_pairwise.to(device)
+            tokens = seq.long().to(device)
+            mask = mask.to(device)
+            y = y.to(device)
+            if plm_pad is not None:
+                plm_pad = plm_pad.to(device)
 
-        loss.backward()
+            logits = model(tokens, x_scalar, x_local, x_pairwise, mask, plm_pad)
+            logits = logits.squeeze(-1)  # [batch, length]
 
-        if (batch_idx + 1) % accumulation_steps == 0:
-            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
-            if not torch.isfinite(grad_norm):
-                raise RuntimeError(f"Non-finite gradient norm at batch {batch_idx}.")
-            optimizer.step()
-            optimizer.zero_grad(set_to_none=True)
-            scheduler.step()
+            if not torch.isfinite(logits).all():
+                raise RuntimeError(f"Non-finite logits at batch {batch_idx}.")
 
-        # Undo the accumulation scaling to track the true loss magnitude
-        total_loss += loss.item() * accumulation_steps * y.size(0)
-        total += y.size(0)
+            # 1. Identify valid labels (ignore -1)
+            valid_label_mask = (y != -1).float()
 
-    return total_loss / max(total, 1)
+            # 2. Combine the padding mask and label mask
+            # If either is 0.0 (padded OR unknown), the combined mask becomes 0.0
+            combined_mask = mask * valid_label_mask
+
+            # 3. Clean y: Replace -1 with 0.0 so BCEWithLogitsLoss doesn't error out
+            y_clean = y.clone().float()
+            y_clean[y == -1] = 0.0
+
+            loss_raw = criterion(logits, y_clean)
+            loss = (
+                (loss_raw * combined_mask).sum()
+                / (combined_mask.sum() + 1e-8)
+                / accumulation_steps
+            )
+            if not torch.isfinite(loss):
+                raise RuntimeError(f"Non-finite loss at batch {batch_idx}.")
+
+            loss.backward()
+
+            if (batch_idx + 1) % accumulation_steps == 0:
+                grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+                if not torch.isfinite(grad_norm):
+                    raise RuntimeError(f"Non-finite gradient norm at batch {batch_idx}.")
+
+                optimizer.step()
+                optimizer.zero_grad(set_to_none=True)
+                scheduler.step()
+                if self.train_cfg.use_ema:
+                    self._ema_update()
+            # For debug
+            # if isinstance(optimizer, PRM) and batch_idx % 10 == 0:
+            #     print("Active fraction:", optimizer.get_mask_stats()["active_fraction"])
+
+            # Undo the accumulation scaling to track the true loss magnitude
+            total_loss += loss.item() * accumulation_steps * y.size(0)
+            total += y.size(0)
+
+        return total_loss / max(total, 1)

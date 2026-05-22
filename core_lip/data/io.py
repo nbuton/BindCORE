@@ -20,7 +20,7 @@ import torch
 from sklearn.preprocessing import StandardScaler
 
 # Adjust this import based on your exact structure
-from core_lip.data.datasets import AA_TO_INT
+from core_lip.data.datasets import AA_TO_INT, ProteinDataset
 from core_lip.eval.structures import ResidueExample
 
 # Allow reading large CSV fields for massive protein sequences
@@ -104,7 +104,9 @@ def _read_blocks(path: str | Path) -> List[List[str]]:
 
 
 def _parse_binary_string(s: str) -> np.ndarray:
-    return np.fromiter((1 if c == "1" else 0 for c in s.strip()), dtype=np.int8)
+    return np.fromiter(
+        (1 if c == "1" else -1 if c == "-" else 0 for c in s.strip()), dtype=np.int8
+    )
 
 
 def _parse_prob_string(s: str) -> np.ndarray:
@@ -169,7 +171,7 @@ def parse_prediction_csv(
     missing = [pid for pid in records if model_name not in records[pid].scores]
     if missing:
         raise ValueError(
-            f"Model '{model_name}' missing predictions for {len(missing)} proteins."
+            f"Model '{model_name}' missing predictions for {len(missing)} proteins. Missing: {missing}"
         )
 
 
@@ -192,7 +194,6 @@ def prepare_data(
 
     for _, row in df.iterrows():
         pid = row["protein_id"]
-
         seq_enc = np.array(
             [aa_to_int_dict.get(aa, 0) for aa in row["sequence"]], dtype=np.int64
         )
@@ -208,7 +209,11 @@ def prepare_data(
         else:
             pairwise_feats = np.empty((0,), dtype=np.float32)
 
-        labels = np.array([int(c) for c in row["LIP_annotations"]])
+        # Convert your list, mapping '-' to -1
+        mapping = {"0": 0, "1": 1, "-": -1}
+        labels = np.array(
+            [mapping[c] for c in row["LIP_annotations"]], dtype=np.float32
+        )
 
         X_scalar_list.append(scalar_feats)
         X_local_list.append(local_feats)
@@ -270,7 +275,7 @@ def cluster_sequences_mmseqs2(
     sequence_col: str = "sequence",
     id_col: str = "id",
     output_file: str = "data/TR1000_cluster.csv",
-    seq_identity: float = 0.25,
+    seq_identity: float = 0.3,
 ) -> pd.DataFrame:
     """Cluster sequences using MMseqs2 at a given sequence identity threshold."""
     # --- Cache Verification Logic ---
@@ -353,3 +358,116 @@ def cluster_sequences_mmseqs2(
     print(f"[clustering] Saved to {output_file}")
 
     return result
+
+
+def ham_mask_val_labels(
+    val_indices: list[int],
+    train_indices: list[int],
+    dataset: ProteinDataset,
+    min_len: int = 10,
+    min_identity: float = 0.8,
+) -> None:
+    """
+    HAM-equivalent: for each val sequence, find aligned regions >= min_len residues
+    with >= min_identity to any training sequence using MMseqs2 easy-search.
+    Masks those residue positions in-place in dataset.labels (sets to -1).
+    Only non-MoRF residues (label=0) are masked, MoRF residues (label=1) are left untouched,
+    mirroring the HAM logic in the paper.
+    """
+    ids = dataset.ids
+    seqs = dataset.seq_enc_list  # encoded, we need raw strings
+
+    # Decode sequences back to amino acid strings
+    IDX_TO_AA = {idx: aa for aa, idx in AA_TO_INT.items()}
+
+    def decode_seq(enc: np.ndarray) -> str:
+        return "".join(IDX_TO_AA.get(int(i), "X") for i in enc)
+
+    val_ids = [ids[i] for i in val_indices]
+    train_ids = [ids[i] for i in train_indices]
+    val_seqs = [decode_seq(seqs[i]) for i in val_indices]
+    train_seqs = [decode_seq(seqs[i]) for i in train_indices]
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        query_fasta = os.path.join(tmpdir, "val.fasta")
+        target_fasta = os.path.join(tmpdir, "train.fasta")
+        result_tsv = os.path.join(tmpdir, "hits.tsv")
+        tmp_path = os.path.join(tmpdir, "tmp")
+
+        with open(query_fasta, "w") as f:
+            for pid, seq in zip(val_ids, val_seqs):
+                f.write(f">{pid}\n{seq}\n")
+
+        with open(target_fasta, "w") as f:
+            for pid, seq in zip(train_ids, train_seqs):
+                f.write(f">{pid}\n{seq}\n")
+
+        # Columns: query, target, identity, alignment_length,
+        #          mismatches, gap_opens, qstart, qend, tstart, tend, evalue, bitscore
+        subprocess.run(
+            [
+                "mmseqs",
+                "easy-search",
+                query_fasta,
+                target_fasta,
+                result_tsv,
+                tmp_path,
+                "--min-seq-id",
+                str(min_identity),
+                "-c",
+                "0.0",  # no coverage filter, we filter by length below
+                "--cov-mode",
+                "2",
+                "--format-output",
+                "query,target,fident,alnlen,qstart,qend",
+                "--threads",
+                "4",
+                "-e",
+                "10",  # loose e-value to catch short local hits
+            ],
+            check=True,
+            capture_output=True,
+        )
+
+        hits = pd.read_csv(
+            result_tsv,
+            sep="\t",
+            header=None,
+            names=["query", "target", "fident", "alnlen", "qstart", "qend"],
+        )
+
+    # Filter to hits that are >= min_len residues and >= min_identity
+    hits = hits[(hits["alnlen"] >= min_len) & (hits["fident"] >= min_identity)]
+
+    if hits.empty:
+        print("[HAM] No homologous regions found in val sequences.")
+        return
+
+    # Build a map: val_id -> list of (qstart, qend) 0-indexed intervals to mask
+    id_to_val_idx = {ids[i]: i for i in val_indices}
+    regions_to_mask: dict[str, list[tuple[int, int]]] = {}
+    for _, row in hits.iterrows():
+        qid = row["query"]
+        # MMseqs2 uses 1-based indexing
+        qstart = int(row["qstart"]) - 1
+        qend = int(row["qend"])  # exclusive when converted from 1-based inclusive
+        regions_to_mask.setdefault(qid, []).append((qstart, qend))
+
+    # Apply masking in-place: only mask label=0 (non-MoRF) residues
+    masked_residues = 0
+    for qid, regions in regions_to_mask.items():
+        if qid not in id_to_val_idx:
+            continue
+        idx = id_to_val_idx[qid]
+        label_arr = dataset.labels[idx]  # np.ndarray, values in {-1, 0, 1}
+        for qstart, qend in regions:
+            for pos in range(qstart, min(qend, len(label_arr))):
+                if label_arr[pos] == 0:
+                    label_arr[pos] = -1
+                    masked_residues += 1
+        dataset.labels[idx] = label_arr
+
+    print(
+        f"[HAM] Masked {masked_residues} non-MoRF residues across "
+        f"{len(regions_to_mask)} val sequences."
+    )
