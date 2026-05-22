@@ -1,5 +1,5 @@
 """
-CORE-LIP — Step 5: Evaluate predictions
+BindCore — Step 5: Evaluate predictions
 =========================================
 Evaluates one or more models on a held-out test set at the residue level.
 All prediction files must follow the CSV format produced by predict.py:
@@ -12,7 +12,7 @@ Usage
         --pred_files  data/predictions/bindcore_TE440.csv \
                       data/predictions/clip_TE440.csv \
                       data/predictions/idplip_TE440.csv \
-        --names       CORE-LIP CLIP IDP-LIP \
+        --names       BindCore CLIP IDP-LIP \
         --output_dir  results/
 """
 

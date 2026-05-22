@@ -1,7 +1,7 @@
 """
 MoRF Prediction Model Comparison Analysis
 ==========================================
-Compares two MoRF predictors (CORE-LIP and MoRFchibi) against ground truth labels.
+Compares two MoRF predictors (BindCORE and MoRFchibi) against ground truth labels.
 Produces:
   - Per-protein and aggregate metrics (AUC, AUPRC, MCC, F1, precision, recall, etc.)
   - Correlation analysis between both models
@@ -166,16 +166,16 @@ common_ids = sorted(ann_ids & core_ids & chibi_ids)
 
 print(f"\n[Intersection debug]")
 print(f"  Annotation IDs            : {len(ann_ids)}")
-print(f"  CORE-LIP prediction IDs   : {len(core_ids)}")
+print(f"  BindCore prediction IDs   : {len(core_ids)}")
 print(f"  MoRFchibi prediction IDs  : {len(chibi_ids)}")
 print(f"  Intersection (all 3)      : {len(common_ids)}")
-print(f"  In annot. not CORE-LIP    : {len(in_ann_not_core)}")
+print(f"  In annot. not BindCore    : {len(in_ann_not_core)}")
 if in_ann_not_core:
     print(f"    IDs: {sorted(in_ann_not_core)}")
 print(f"  In annot. not MoRFchibi   : {len(in_ann_not_chibi)}")
 if in_ann_not_chibi:
     print(f"    IDs: {sorted(in_ann_not_chibi)}")
-print(f"  In CORE-LIP but not annot.: {len(only_core)}")
+print(f"  In BindCore but not annot.: {len(only_core)}")
 if only_core:
     print(f"    IDs: {sorted(only_core)}")
 print(f"  In MoRFchibi but not annot: {len(only_chibi)}")
@@ -200,7 +200,7 @@ print(f"\nProteins in all three files: {len(common_ids)}")
 # -------------------------------------------------
 # 2b. SCORE NORMALISATION
 # -------------------------------------------------
-# Raw scores are NOT probabilities (e.g. CORE-LIP is squashed into ~[0.4, 0.6]).
+# Raw scores are NOT probabilities (e.g. BindCore is squashed into ~[0.4, 0.6]).
 # We normalise globally using the empirical CDF (rank normalisation):
 #   each score is mapped to its percentile rank across ALL residues.
 # This is robust to outliers and handles any non-linear score scale.
@@ -229,7 +229,7 @@ _core_sorted, _core_pct = _make_rank_lut(_all_core_raw)
 _chibi_sorted, _chibi_pct = _make_rank_lut(_all_chibi_raw)
 
 print("\n[Score normalisation -- raw score statistics]")
-for name, raw in [("CORE-LIP", _all_core_raw), ("MoRFchibi", _all_chibi_raw)]:
+for name, raw in [("BindCore", _all_core_raw), ("MoRFchibi", _all_chibi_raw)]:
     p1, p99 = np.percentile(raw, 1), np.percentile(raw, 99)
     print(
         f"  {name:10s}: min={raw.min():.4f}  max={raw.max():.4f}  "
@@ -341,7 +341,7 @@ def aggregate_metrics(y_true, y_score, y_bin, name):
     return metrics
 
 
-m1 = aggregate_metrics(y_true, y_core, y_core_bin, "CORE-LIP")
+m1 = aggregate_metrics(y_true, y_core, y_core_bin, "BindCore")
 m2 = aggregate_metrics(y_true, y_chibi, y_chibi_bin, "MoRFchibi")
 metrics_df = pd.DataFrame([m1, m2]).set_index("Model")
 
@@ -367,7 +367,7 @@ print(f"  Binary agreement = {100*binary_agree:.1f}%")
 # 5.  DISAGREEMENT ANALYSIS
 # ─────────────────────────────────────────────
 
-# Quadrants: both correct, CORE-LIP only, MoRFchibi only, both wrong
+# Quadrants: both correct, BindCore only, MoRFchibi only, both wrong
 both_correct = (y_core_bin == y_true) & (y_chibi_bin == y_true)
 core_only = (y_core_bin == y_true) & (y_chibi_bin != y_true)
 chibi_only = (y_core_bin != y_true) & (y_chibi_bin == y_true)
@@ -377,7 +377,7 @@ disagree_mask = y_core_bin != y_chibi_bin  # one says 1, other 0
 
 print(f"\n=== AGREEMENT BREAKDOWN ===")
 print(f"  Both correct  : {both_correct.sum():>7,}  ({100*both_correct.mean():.1f}%)")
-print(f"  CORE-LIP only : {core_only.sum():>7,}  ({100*core_only.mean():.1f}%)")
+print(f"  BindCore only : {core_only.sum():>7,}  ({100*core_only.mean():.1f}%)")
 print(f"  MoRFchibi only: {chibi_only.sum():>7,}  ({100*chibi_only.mean():.1f}%)")
 print(f"  Both wrong    : {both_wrong.sum():>7,}  ({100*both_wrong.mean():.1f}%)")
 print(f"  Disagreements : {disagree_mask.sum():>7,}  ({100*disagree_mask.mean():.1f}%)")
@@ -385,8 +385,8 @@ print(f"  Disagreements : {disagree_mask.sum():>7,}  ({100*disagree_mask.mean():
 # Performance on disagreement subsets
 print("\n  When models disagree:")
 for mask_name, mask in [
-    ("CORE-LIP=1, MoRFchibi=0", (y_core_bin == 1) & (y_chibi_bin == 0)),
-    ("CORE-LIP=0, MoRFchibi=1", (y_core_bin == 0) & (y_chibi_bin == 1)),
+    ("BindCore=1, MoRFchibi=0", (y_core_bin == 1) & (y_chibi_bin == 0)),
+    ("BindCore=0, MoRFchibi=1", (y_core_bin == 0) & (y_chibi_bin == 1)),
 ]:
     if mask.sum() > 10:
         true_rate = y_true[mask].mean()
@@ -398,7 +398,7 @@ for mask_name, mask in [
 # 6.  FIGURES
 # ─────────────────────────────────────────────
 
-PALETTE = {"CORE-LIP": "#2C7BB6", "MoRFchibi": "#D7191C"}
+PALETTE = {"BindCore": "#2C7BB6", "MoRFchibi": "#D7191C"}
 sns.set_style("whitegrid")
 sns.set_context("paper", font_scale=1.2)
 
@@ -406,7 +406,7 @@ sns.set_context("paper", font_scale=1.2)
 fig, axes = plt.subplots(1, 2, figsize=(12, 5))
 
 for ax, (name, y_score, y_bin) in zip(
-    axes, [("CORE-LIP", y_core, y_core_bin), ("MoRFchibi", y_chibi, y_chibi_bin)]
+    axes, [("BindCore", y_core, y_core_bin), ("MoRFchibi", y_chibi, y_chibi_bin)]
 ):
     fpr, tpr, _ = roc_curve(y_true, y_score)
     prec, rec, _ = precision_recall_curve(y_true, y_score)
@@ -425,7 +425,7 @@ plt.close()
 
 # ── 6.2  PR curves (both on same plot) ───────────────────────────────────────
 fig, ax = plt.subplots(figsize=(7, 5))
-for name, y_score in [("CORE-LIP", y_core), ("MoRFchibi", y_chibi)]:
+for name, y_score in [("BindCore", y_core), ("MoRFchibi", y_chibi)]:
     prec, rec, _ = precision_recall_curve(y_true, y_score)
     ap = average_precision_score(y_true, y_score)
     ax.plot(rec, prec, color=PALETTE[name], lw=2, label=f"{name}  AP={ap:.3f}")
@@ -454,7 +454,7 @@ sc = axes[0].scatter(
     vmax=1,
 )
 plt.colorbar(sc, ax=axes[0], label="True label")
-axes[0].set_xlabel("CORE-LIP score")
+axes[0].set_xlabel("BindCore score")
 axes[0].set_ylabel("MoRFchibi score")
 axes[0].set_title(f"Score Scatter  (Pearson r={pear_r:.3f})")
 axes[0].plot([0, 1], [0, 1], "k--", lw=1)
@@ -462,7 +462,7 @@ axes[0].plot([0, 1], [0, 1], "k--", lw=1)
 # Hexbin density
 hb = axes[1].hexbin(y_core, y_chibi, gridsize=60, cmap="YlOrRd", mincnt=1)
 plt.colorbar(hb, ax=axes[1], label="Count")
-axes[1].set_xlabel("CORE-LIP score")
+axes[1].set_xlabel("BindCore score")
 axes[1].set_ylabel("MoRFchibi score")
 axes[1].set_title("Score Density (hexbin)")
 axes[1].plot([0, 1], [0, 1], "k--", lw=1)
@@ -474,7 +474,7 @@ plt.close()
 # -- 6.4a  Raw vs Normalised score distributions (before/after)
 fig, axes = plt.subplots(2, 4, figsize=(18, 8))
 pairs = [
-    ("CORE-LIP", y_core_raw, y_core, PALETTE["CORE-LIP"]),
+    ("BindCore", y_core_raw, y_core, PALETTE["BindCore"]),
     ("MoRFchibi", y_chibi_raw, y_chibi, PALETTE["MoRFchibi"]),
 ]
 for col_offset, (name, raw, norm, color) in enumerate(pairs):
@@ -521,7 +521,7 @@ fig, axes = plt.subplots(2, 2, figsize=(12, 8))
 for row_i, label_val, lbl in [(0, 1, "MoRF (label=1)"), (1, 0, "Non-MoRF (label=0)")]:
     mask_lbl = y_true == label_val
     for col_i, (name, y_score) in enumerate(
-        [("CORE-LIP", y_core), ("MoRFchibi", y_chibi)]
+        [("BindCore", y_core), ("MoRFchibi", y_chibi)]
     ):
         axes[row_i, col_i].hist(
             y_score[mask_lbl],
@@ -552,14 +552,14 @@ axes[0].scatter(
     valid["bindcore_AUC"], valid["MoRFchibi_AUC"], alpha=0.5, s=20, color="#555"
 )
 axes[0].plot([0, 1], [0, 1], "r--", lw=1)
-axes[0].set_xlabel("CORE-LIP AUC")
+axes[0].set_xlabel("BindCore AUC")
 axes[0].set_ylabel("MoRFchibi AUC")
 axes[0].set_title("Per-protein AUC")
 
 diff = valid["bindcore_AUC"] - valid["MoRFchibi_AUC"]
 axes[1].hist(diff, bins=40, color="#555", edgecolor="none", alpha=0.8)
 axes[1].axvline(0, color="red", lw=1.5)
-axes[1].set_xlabel("CORE-LIP AUC  –  MoRFchibi AUC")
+axes[1].set_xlabel("BindCore AUC  –  MoRFchibi AUC")
 axes[1].set_ylabel("Proteins")
 axes[1].set_title(f"AUC Difference  (mean={diff.mean():+.3f})")
 
@@ -574,14 +574,14 @@ axes[0].scatter(
     pp_df["bindcore_MCC"], pp_df["MoRFchibi_MCC"], alpha=0.5, s=20, color="#555"
 )
 axes[0].plot([-1, 1], [-1, 1], "r--", lw=1)
-axes[0].set_xlabel("CORE-LIP MCC")
+axes[0].set_xlabel("BindCore MCC")
 axes[0].set_ylabel("MoRFchibi MCC")
 axes[0].set_title("Per-protein MCC")
 
 diff_mcc = pp_df["bindcore_MCC"] - pp_df["MoRFchibi_MCC"]
 axes[1].hist(diff_mcc.dropna(), bins=40, color="#555", edgecolor="none", alpha=0.8)
 axes[1].axvline(0, color="red", lw=1.5)
-axes[1].set_xlabel("CORE-LIP MCC  –  MoRFchibi MCC")
+axes[1].set_xlabel("BindCore MCC  –  MoRFchibi MCC")
 axes[1].set_ylabel("Proteins")
 axes[1].set_title(f"MCC Difference  (mean={diff_mcc.mean():+.3f})")
 
@@ -590,7 +590,7 @@ plt.savefig("figures/06_per_protein_mcc.png", dpi=150, bbox_inches="tight")
 plt.close()
 
 # ── 6.7  Agreement breakdown bar ─────────────────────────────────────────────
-cats = ["Both correct", "CORE-LIP only", "MoRFchibi only", "Both wrong"]
+cats = ["Both correct", "BindCore only", "MoRFchibi only", "Both wrong"]
 counts = [both_correct.sum(), core_only.sum(), chibi_only.sum(), both_wrong.sum()]
 colors = ["#2ECC71", "#2C7BB6", "#D7191C", "#E74C3C"]
 
@@ -617,7 +617,7 @@ fig, ax = plt.subplots(figsize=(10, 5))
 x = np.arange(len(metric_cols))
 w = 0.35
 for i, (model, color) in enumerate(
-    [("CORE-LIP", PALETTE["CORE-LIP"]), ("MoRFchibi", PALETTE["MoRFchibi"])]
+    [("BindCore", PALETTE["BindCore"]), ("MoRFchibi", PALETTE["MoRFchibi"])]
 ):
     vals = [metrics_df.loc[model, m] for m in metric_cols]
     bars = ax.bar(x + i * w - w / 2, vals, w, label=model, color=color, alpha=0.85)
@@ -634,7 +634,7 @@ plt.close()
 # ── 6.9  Confusion matrices ───────────────────────────────────────────────────
 fig, axes = plt.subplots(1, 2, figsize=(10, 4))
 for ax, (name, y_bin) in zip(
-    axes, [("CORE-LIP", y_core_bin), ("MoRFchibi", y_chibi_bin)]
+    axes, [("BindCore", y_core_bin), ("MoRFchibi", y_chibi_bin)]
 ):
     cm = confusion_matrix(y_true, y_bin)
     sns.heatmap(
@@ -682,7 +682,7 @@ plt.close()
 # ── 6.11  MoRF fraction vs per-protein AUC ───────────────────────────────────
 fig, axes = plt.subplots(1, 2, figsize=(13, 5))
 for ax, name, col in [
-    (axes[0], "CORE-LIP", "bindcore_AUC"),
+    (axes[0], "BindCore", "bindcore_AUC"),
     (axes[1], "MoRFchibi", "MoRFchibi_AUC"),
 ]:
     sub = pp_df.dropna(subset=[col])
@@ -703,7 +703,7 @@ plt.close()
 fig, ax = plt.subplots(figsize=(7, 5))
 bins = np.linspace(0, 1, 11)
 for name, y_score, color in [
-    ("CORE-LIP", y_core, PALETTE["CORE-LIP"]),
+    ("BindCore", y_core, PALETTE["BindCore"]),
     ("MoRFchibi", y_chibi, PALETTE["MoRFchibi"]),
 ]:
     bin_idx = np.digitize(y_score, bins) - 1
@@ -865,11 +865,11 @@ ax = axes[0]
 ax.plot(
     cum_df["max_length"],
     cum_df["bindcore_AUPRC"],
-    color=PALETTE["CORE-LIP"],
+    color=PALETTE["BindCore"],
     lw=2,
     marker="o",
     ms=4,
-    label="CORE-LIP",
+    label="BindCore",
 )
 ax.plot(
     cum_df["max_length"],
@@ -900,11 +900,11 @@ ax = axes[1]
 ax.plot(
     cum_df["max_length"],
     cum_df["bindcore_AUC"],
-    color=PALETTE["CORE-LIP"],
+    color=PALETTE["BindCore"],
     lw=2,
     marker="o",
     ms=4,
-    label="CORE-LIP",
+    label="BindCore",
 )
 ax.plot(
     cum_df["max_length"],
@@ -949,8 +949,8 @@ for ax, metric, ylabel, title in [
         x - w / 2,
         bin_df[c_col],
         w,
-        label="CORE-LIP",
-        color=PALETTE["CORE-LIP"],
+        label="BindCore",
+        color=PALETTE["BindCore"],
         alpha=0.85,
         edgecolor="white",
     )
@@ -985,7 +985,7 @@ fig, axes = plt.subplots(1, 2, figsize=(14, 5))
 valid_auprc = pp_df.dropna(subset=["bindcore_AUPRC", "MoRFchibi_AUPRC"])
 
 for ax, name, col in [
-    (axes[0], "CORE-LIP", "bindcore_AUPRC"),
+    (axes[0], "BindCore", "bindcore_AUPRC"),
     (axes[1], "MoRFchibi", "MoRFchibi_AUPRC"),
 ]:
     sc = ax.scatter(
@@ -1078,7 +1078,7 @@ print(
     f"  Metric used: AUC on {n_auc} proteins, MCC on {n_no_auc} proteins (single-class after masking)"
 )
 print(
-    f"  CORE-LIP  better : {core_better_total:>3}/{len(pp_df)}  ({100*core_better_total/len(pp_df):.1f}%)  "
+    f"  BindCore  better : {core_better_total:>3}/{len(pp_df)}  ({100*core_better_total/len(pp_df):.1f}%)  "
     f"[AUC: {core_better_auc}, MCC: {core_better_mcc}]"
 )
 print(
@@ -1091,14 +1091,14 @@ print(
 
 # Which model is more conservative / aggressive?
 print(f"\n[4] Threshold Behaviour (binary predictions)")
-for name, y_bin in [("CORE-LIP", y_core_bin), ("MoRFchibi", y_chibi_bin)]:
+for name, y_bin in [("BindCore", y_core_bin), ("MoRFchibi", y_chibi_bin)]:
     print(
         f"  {name}: predicted positives = {100*y_bin.mean():.1f}%  "
         f"(true positive rate = {y_true.mean()*100:.1f}%)"
     )
 
 print(f"\n[5] Per-protein AUC stats")
-for name, col in [("CORE-LIP", "bindcore_AUC"), ("MoRFchibi", "MoRFchibi_AUC")]:
+for name, col in [("BindCore", "bindcore_AUC"), ("MoRFchibi", "MoRFchibi_AUC")]:
     vals = pp_df[col].dropna()
     print(
         f"  {name}:  mean={vals.mean():.3f}  median={vals.median():.3f}  std={vals.std():.3f}  "
@@ -1106,7 +1106,7 @@ for name, col in [("CORE-LIP", "bindcore_AUC"), ("MoRFchibi", "MoRFchibi_AUC")]:
     )
 
 print(f"\n[6] Calibration (Brier score – lower is better)")
-for name in ["CORE-LIP", "MoRFchibi"]:
+for name in ["BindCore", "MoRFchibi"]:
     print(
         f"  {name}: Brier = {metrics_df.loc[name,'Brier']:.4f}  "
         f"Log-loss = {metrics_df.loc[name,'LogLoss']:.4f}"
@@ -1141,7 +1141,7 @@ for kl in key_lengths:
     if row_c is not None:
         print(
             f"  <= {kl:4d} aa ({int(row_c['n_proteins']):3d} proteins): "
-            f"CORE-LIP AUPRC={row_c['bindcore_AUPRC']:.3f}  MoRFchibi AUPRC={row_c['MoRFchibi_AUPRC']:.3f}"
+            f"BindCore AUPRC={row_c['bindcore_AUPRC']:.3f}  MoRFchibi AUPRC={row_c['MoRFchibi_AUPRC']:.3f}"
         )
 
 print("\nAll figures saved to ./figures/")

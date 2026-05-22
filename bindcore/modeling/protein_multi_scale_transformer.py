@@ -1,5 +1,5 @@
 """
-CORE-LIP: COformational Representation Ensemble for LIP prediction
+BindCORE: COformational Representation Ensemble for LIP prediction
 ===================================================================
 ProteinMultiScaleTransformer — the main model.
 
@@ -624,7 +624,7 @@ class PairwiseUpdateBlock(nn.Module):
 
 class ProteinMultiScaleTransformer(nn.Module):
     """
-    CORE-LIP: multi-scale protein representation model for LIP prediction.
+    BindCORE: multi-scale protein representation model for binding prediction.
     """
 
     def __init__(self, cfg: ProteinModelConfig, stats):

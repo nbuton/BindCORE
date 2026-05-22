@@ -1,5 +1,5 @@
 """
-CORE-LIP — Step 2: Visualise feature distributions
+BindCore — Step 2: Visualise feature distributions
 ===================================================
 Generates violin-plot comparisons of conformational features between
 LIP and non-LIP residues, and saves a publication-ready PDF figure.

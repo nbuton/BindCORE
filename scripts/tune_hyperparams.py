@@ -324,7 +324,7 @@ def trainable(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Hyperparameter optimisation for CORE-LIP with Ray Tune"
+        description="Hyperparameter optimisation for BindCore with Ray Tune"
     )
     parser.add_argument(
         "--search-space",

@@ -1,5 +1,5 @@
 """
-CORE-LIP — Step 4: Make predictions
+BindCore — Step 4: Make predictions
 =====================================
 Thin CLI wrapper around bindcore.predictor.
 
@@ -25,7 +25,7 @@ from bindcore.engine.predictor import load_checkpoint, predict_dataset
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run CORE-LIP predictions.")
+    parser = argparse.ArgumentParser(description="Run BindCore predictions.")
     parser.add_argument("--model", default="data/models/bindCORE.pt")
     parser.add_argument("--h5", default="data/protein_MD_properties.h5")
     parser.add_argument(

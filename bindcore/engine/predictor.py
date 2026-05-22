@@ -33,7 +33,7 @@ def load_checkpoint(
     device: torch.device,
 ) -> tuple[ProteinMultiScaleTransformer, dict]:
     """
-    Load a CORE-LIP checkpoint and return a ready-to-use model + the raw dict.
+    Load a BindCORE checkpoint and return a ready-to-use model + the raw dict.
 
     Parameters
     ----------

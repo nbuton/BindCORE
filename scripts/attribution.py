@@ -706,7 +706,7 @@ def dataset_attribution(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="DeepLiftShap feature attribution for CORE-LIP",
+        description="DeepLiftShap feature attribution for BindCore",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("--model", required=True, help="Path to .pt checkpoint")

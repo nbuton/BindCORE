@@ -1,5 +1,5 @@
 """
-CORE-LIP
+BindCORE
 ========
 COformational Representation Ensemble for Linear Interaction Peptide (LIP) prediction.
 

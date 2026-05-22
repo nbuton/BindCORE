@@ -91,7 +91,7 @@ def summary_report(results: Dict[str, AttributionResult]) -> pd.DataFrame:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run CORE-LIP interpretability methods over one or more datasets."
+        description="Run BindCore interpretability methods over one or more datasets."
     )
     parser.add_argument(
         "--model",

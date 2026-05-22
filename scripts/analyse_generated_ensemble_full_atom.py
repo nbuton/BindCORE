@@ -404,7 +404,7 @@ def main():
     if not DATA_ROOT.exists():
         sys.exit(
             f"Data root not found: {DATA_ROOT}\n"
-            "Run this script from your project root (~/Documents/my_project/CORE-LIP)."
+            "Run this script from your project root (~/Documents/my_project/BindCORE)."
         )
 
     protein_dirs = sorted([d for d in DATA_ROOT.iterdir() if d.is_dir()])

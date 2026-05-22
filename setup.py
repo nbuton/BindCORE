@@ -1,7 +1,7 @@
 from setuptools import setup
 
 setup(
-    name="core-lip",
+    name="bindcore",
     version="0.1.0",
     description="COformational Representation Ensemble for LIP prediction",
     packages=["bindcore"],  # The actual folder name

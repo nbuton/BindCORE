@@ -1,4 +1,4 @@
-# CORE-LIP dependencies
+# BindCORE dependencies
 
 # Deep learning
 torch>=2.0
