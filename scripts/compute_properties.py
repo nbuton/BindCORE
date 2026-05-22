@@ -2,54 +2,9 @@ import argparse
 import logging
 import concurrent.futures
 from pathlib import Path
-import mdtraj as md
 from tqdm import tqdm
 
-# Note: Ensure save_properties_to_h5 and other custom utilities
-# are imported or defined in your environment.
-
-
-def process_single_protein(
-    protein_dir: Path, pdb_name: str, xtc_name: str, convert_dcd: bool = False
-) -> tuple[str, dict]:
-    """
-    Processes a single protein directory, handles file resolution,
-    optional DCD conversion, and property extraction.
-    """
-    protein_id = protein_dir.name
-    pdb_path = protein_dir / pdb_name
-    xtc_path = protein_dir / xtc_name
-
-    # 1. Check for Topology
-    if not pdb_path.exists():
-        return protein_id, {"error": f"PDB not found: {pdb_path.name}"}
-
-    # 2. Check for Trajectory / Handle DCD Conversion
-    if not xtc_path.exists():
-        if convert_dcd:
-            dcd_path = xtc_path.with_suffix(".dcd")
-            if dcd_path.exists():
-                try:
-                    # Convert DCD to XTC
-                    traj = md.load(str(dcd_path), top=str(pdb_path))
-                    traj.save_xtc(str(xtc_path))
-                except Exception as e:
-                    return protein_id, {"error": f"DCD conversion failed: {e}"}
-            else:
-                return protein_id, {
-                    "error": f"Neither XTC nor DCD found for {protein_id}"
-                }
-        else:
-            return protein_id, {"error": f"XTC not found: {xtc_path.name}"}
-
-    # 3. Extraction Logic
-    # Replace the placeholder below with your actual analysis functions
-    try:
-        # Example: props = calculate_metrics(pdb_path, xtc_path)
-        props = {"status": "success"}  # Placeholder
-        return protein_id, props
-    except Exception as e:
-        return protein_id, {"error": f"Extraction failed: {e}"}
+from bindcore.data.properties_extraction import process_single_protein
 
 
 def main():

@@ -69,36 +69,53 @@ def convert_trajectory_format(folder_path: Path) -> None:
 
 
 def process_single_protein(
-    protein_dir: Path, pdb_name="top_AA.pdb", xtc_name="traj_AA.xtc"
+    protein_dir: Path, pdb_name: str, xtc_name: str, convert_dcd: bool = False
 ) -> tuple[str, dict]:
     """
     Worker function: Handles conversion and feature extraction for one protein.
-    Returns (protein_id, feature_dict).
     """
-    protein_id = protein_dir.stem
-    traj_path_xtc = protein_dir / "traj_AA.xtc"
-
-    # Convert if necessary
-    if not traj_path_xtc.exists():
-        convert_trajectory_format(protein_dir)
-
+    # Use .name to get the actual folder ID (e.g., A0A0H3JS52)
+    protein_id = protein_dir.name
     pdb_path = protein_dir / pdb_name
     xtc_path = protein_dir / xtc_name
 
+    # 1. Handle DCD to XTC conversion if requested
+    if not xtc_path.exists() and convert_dcd:
+        dcd_path = xtc_path.with_suffix(".dcd")
+        if dcd_path.exists():
+            try:
+                # Load DCD and save as XTC to local folder
+                traj = md.load_dcd(str(dcd_path), top=str(pdb_path))
+                traj.save_xtc(str(xtc_path))
+            except Exception as e:
+                return protein_id, {"error": f"DCD conversion failed: {e}"}
+        else:
+            return protein_id, {
+                "error": f"No XTC found and no DCD available for conversion"
+            }
+
+    # 2. Final check before analysis
     if not xtc_path.exists():
-        raise FileNotFoundError(f"Missing trajectory for {protein_id}")
+        return protein_id, {"error": f"Missing trajectory: {xtc_path.name}"}
+    if not pdb_path.exists():
+        return protein_id, {"error": f"Missing topology: {pdb_path.name}"}
 
-    analyzer = ProteinAnalyzer(pdb_path, xtc_path)
-    properties = analyzer.compute_all(
-        sasa_n_sphere=1600,
-        contact_cutoff=8.0,
-        scaling_min_sep=5,
-    )
+    # 3. Compute properties using your ProteinAnalyzer
+    try:
+        analyzer = ProteinAnalyzer(str(pdb_path), str(xtc_path))
+        properties = analyzer.compute_all(
+            sasa_n_sphere=1600,
+            contact_cutoff=8.0,
+            scaling_min_sep=5,
+        )
 
-    if properties is None:
-        raise RuntimeError(f"Failed to compute properties for {protein_id}")
+        if properties is None:
+            return protein_id, {"error": "Analyzer returned None"}
 
-    return protein_id, properties
+        return protein_id, properties
+
+    except Exception as e:
+        return protein_id, {"error": f"Extraction failed: {str(e)}"}
 
 
 def save_properties_to_h5(dico_properties: dict, output_filepath: str | Path) -> None:
