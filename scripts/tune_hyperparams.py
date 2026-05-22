@@ -313,7 +313,7 @@ def trainable(
             os.unlink(tmp_path)
 
     best_auc = float(np.mean(scores)) if scores else 0.0  # ← average
-    tune.report({"auc": best_auc})
+    tune.report({"PR-AUC": best_auc})
 
 
 # -----------------------------------------------------------------------------
@@ -341,7 +341,7 @@ def main() -> None:
     parser.add_argument("--gpus-per-trial", type=float, default=1.0)
     parser.add_argument("--num-seeds", type=int, default=2)
     parser.add_argument("--output-dir", default="./ray_results")
-    parser.add_argument("--exp-name", default="core_MoRF_hpo_two_seeds")
+    parser.add_argument("--exp-name", default="core_MoRF_hpo_two_seeds_V3")
     args = parser.parse_args()
 
     # -- Load the single YAML -------------------------------------------------
@@ -411,11 +411,11 @@ def main() -> None:
     results = tuner.fit()
 
     # -- Best result ----------------------------------------------------------
-    best = results.get_best_result(metric="auc", mode="max")
+    best = results.get_best_result(metric="PR-AUC", mode="max")
     print("\n" + "=" * 60)
     print("BEST TRIAL")
     print("=" * 60)
-    print(f"  AUC : {best.metrics['auc']:.4f}")
+    print(f"  PR-AUC : {best.metrics['PR-AUC']:.4f}")
     print("  Params:")
     for k, v in best.config.items():
         print(f"    {k:30s}: {v}")
