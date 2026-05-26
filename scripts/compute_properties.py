@@ -10,107 +10,129 @@ from bindcore.data.properties_extraction import (
 )
 
 
-def main():
+def parse_args():
     parser = argparse.ArgumentParser(
         description="Compute conformational MD properties with dynamic file resolution."
     )
     parser.add_argument(
-        "--input_dir",
-        type=Path,
-        required=True,
+        "--input_dir", type=Path, required=True,
         help="Directory containing protein subfolders.",
     )
     parser.add_argument(
-        "--workers", type=int, default=15, help="Number of parallel processes."
+        "--workers", type=int, default=15,
+        help="Number of parallel processes.",
     )
-
-    # Naming Arguments
     parser.add_argument(
-        "--pdb_name",
-        type=str,
-        default="_allatom.pdb",
+        "--pdb_name", type=str, default="_allatom.pdb",
         help="Full filename or suffix (if --dynamic is used).",
     )
     parser.add_argument(
-        "--xtc_name",
-        type=str,
-        default="_allatom.xtc",
+        "--xtc_name", type=str, default="_allatom.xtc",
         help="Full filename or suffix (if --dynamic is used).",
-    )
-
-    # Functional Flags
+    ) 
     parser.add_argument(
-        "--dynamic",
-        action="store_true",
+        "--dynamic", action="store_true",
         help="Prepend folder name (Protein ID) to pdb/xtc arguments.",
     )
     parser.add_argument(
-        "--convert_dcd",
-        action="store_true",
+        "--convert_dcd", action="store_true",
         help="If XTC is missing, look for DCD and convert it.",
     )
+    parser.add_argument(
+        "--n_subsample_trajectory", type=int, default=-1,
+        help="Number of trajectory frames to use. -1 means all.",
+    )
+    parser.add_argument(
+        "--debug", action="store_true",
+    )
+    return parser.parse_args()
 
-    args = parser.parse_args()
 
-    # Gather directories
+def resolve_filenames(d: Path, pdb_name: str, xtc_name: str, dynamic: bool):
+    if dynamic:
+        return f"{d.name}{pdb_name}", f"{d.name}{xtc_name}"
+    return pdb_name, xtc_name
+
+
+def submit_kwargs(d: Path, pdb: str, xtc: str, args) -> dict:
+    return dict(
+        pdb_name=pdb,
+        xtc_name=xtc,
+        convert_dcd=args.convert_dcd,
+        n_subsample_trajectory=args.n_subsample_trajectory,
+    )
+
+
+def process_result(pid, props, results_dict):
+    if "error" in props:
+        logging.error(f"Protein {pid}: {props['error']}")
+    else:
+        results_dict[pid] = props
+
+
+def run_sequential(directories, args):
+    results_dict = {}
+    for d in tqdm(directories):
+        pdb, xtc = resolve_filenames(d, args.pdb_name, args.xtc_name, args.dynamic)
+        try:
+            pid, props = process_single_protein(d, **submit_kwargs(d, pdb, xtc, args))
+            process_result(pid, props, results_dict)
+        except Exception as e:
+            logging.error(f"Critical process failure for {d.name}: {e}")
+    return results_dict
+
+
+def run_parallel(directories, args):
+    results_dict = {}
+    with concurrent.futures.ProcessPoolExecutor(max_workers=args.workers) as executor:
+        futures = {
+            executor.submit(
+                process_single_protein, d,
+                **submit_kwargs(d, *resolve_filenames(d, args.pdb_name, args.xtc_name, args.dynamic), args)
+            ): d
+            for d in directories
+        }
+        for future in tqdm(concurrent.futures.as_completed(futures), total=len(futures)):
+            protein_dir = futures[future]
+            try:
+                pid, props = future.result()
+                process_result(pid, props, results_dict)
+            except Exception as e:
+                logging.error(f"Critical process failure for {protein_dir.name}: {e}")
+    return results_dict
+
+
+def save_results(results_dict, input_dir):
+    output_h5 = Path("data/properties/") / f"{input_dir.stem}_derived_properties.h5"
+    output_h5.parent.mkdir(parents=True, exist_ok=True)
+    save_properties_to_h5(results_dict, output_h5)
+    print(f"Successfully processed {len(results_dict)} proteins. Saved to {output_h5}")
+
+
+def main():
+    args = parse_args()
+
     directories = [d for d in args.input_dir.iterdir() if d.is_dir()]
+    if args.debug:
+        directories = directories[:5]
+
     if not directories:
         print(f"No subdirectories found in {args.input_dir}")
         return
 
-    print(
-        f"Found {len(directories)} proteins. Processing with {args.workers} workers..."
-    )
+    print(f"Found {len(directories)} proteins. Processing with {args.workers} workers...")
 
-    results_dict = {}
-    with concurrent.futures.ProcessPoolExecutor(max_workers=args.workers) as executor:
-        # Construct names and submit jobs
-        futures = {}
-        for d in directories:
-            pdb = f"{d.name}{args.pdb_name}" if args.dynamic else args.pdb_name
-            xtc = f"{d.name}{args.xtc_name}" if args.dynamic else args.xtc_name
+    results_dict = run_sequential(directories, args) if args.workers == 1 else run_parallel(directories, args)
 
-            job = executor.submit(
-                process_single_protein,
-                d,
-                pdb_name=pdb,
-                xtc_name=xtc,
-                convert_dcd=args.convert_dcd,
-            )
-            futures[job] = d
-
-        # Process results with progress bar
-        for future in tqdm(
-            concurrent.futures.as_completed(futures), total=len(futures)
-        ):
-            protein_dir = futures[future]
-            try:
-                pid, props = future.result()
-                if "error" in props:
-                    logging.error(f"Protein {pid}: {props['error']}")
-                else:
-                    results_dict[pid] = props
-            except Exception as e:
-                logging.error(f"Critical process failure for {protein_dir.name}: {e}")
-
-    # Save Output
     if results_dict:
-        output_h5 = (
-            Path("data/properties/") / f"{args.input_dir.stem}_derived_properties.h5"
-        )
-        output_h5.parent.mkdir(parents=True, exist_ok=True)
-
-        save_properties_to_h5(results_dict, output_h5)
-        print(
-            f"Successfully processed {len(results_dict)} proteins. Saved to {output_h5}"
-        )
+        save_results(results_dict, args.input_dir)
     else:
         print("No successful results to save.")
 
 
 if __name__ == "__main__":
     logging.basicConfig(
-        level=logging.INFO,
+        level=logging.WARNING,
         format="%(levelname)s: %(message)s",
         handlers=[logging.StreamHandler()],
     )

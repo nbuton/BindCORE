@@ -70,7 +70,7 @@ def convert_trajectory_format(folder_path: Path) -> None:
 
 
 def process_single_protein(
-    protein_dir: Path, pdb_name: str, xtc_name: str, convert_dcd: bool = False
+    protein_dir: Path, pdb_name: str, xtc_name: str, convert_dcd: bool = False,n_subsample_trajectory:int = -1
 ) -> tuple[str, dict]:
     """
     Worker function: Handles conversion and feature extraction for one protein.
@@ -103,9 +103,9 @@ def process_single_protein(
 
     # 3. Compute properties using your ProteinAnalyzer
     try:
-        analyzer = ProteinAnalyzer(pdb_path, xtc_path)
+        analyzer = ProteinAnalyzer(pdb_path, xtc_path,n_subsample_trajectory=n_subsample_trajectory)
         properties = analyzer.compute_all(
-            sasa_n_sphere=1600,
+            sasa_n_sphere=960,
             contact_cutoff=8.0,
             scaling_min_sep=5,
         )
