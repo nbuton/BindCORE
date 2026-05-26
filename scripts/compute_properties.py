@@ -2,6 +2,7 @@ import argparse
 import logging
 import concurrent.futures
 from pathlib import Path
+import h5py
 from tqdm import tqdm
 
 from bindcore.data.properties_extraction import (
@@ -101,18 +102,32 @@ def run_parallel(directories, args):
                 logging.error(f"Critical process failure for {protein_dir.name}: {e}")
     return results_dict
 
+def get_already_processed(output_h5: Path) -> set[str]:
+    """Return the set of protein IDs already present in the HDF5 file."""
+    if not output_h5.exists():
+        return set()
+    with h5py.File(output_h5, "r") as h5f:
+        return set(h5f.keys())
 
 def save_results(results_dict, input_dir):
-    output_h5 = Path("data/properties/") / f"{input_dir.stem}_derived_properties.h5"
+    output_h5 = get_output_path(input_dir) 
     output_h5.parent.mkdir(parents=True, exist_ok=True)
     save_properties_to_h5(results_dict, output_h5)
     print(f"Successfully processed {len(results_dict)} proteins. Saved to {output_h5}")
 
+def get_output_path(input_dir: Path) -> Path:
+    return Path("data/properties/") / f"{input_dir.stem}_derived_properties.h5"
 
 def main():
     args = parse_args()
 
     directories = [d for d in args.input_dir.iterdir() if d.is_dir()]
+    output_h5 = get_output_path(args.input_dir) 
+    already_done = get_already_processed(output_h5)
+
+    directories = [d for d in directories if d.name not in already_done]
+    print(f"Skipping {len(already_done)} already-processed proteins.")
+    print(f"Remaining: {len(directories)} to process.")
     if args.debug:
         directories = directories[:5]
 
