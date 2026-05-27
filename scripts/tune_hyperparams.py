@@ -16,7 +16,7 @@ import tempfile
 from pathlib import Path
 import numpy as np
 from typing import Any
-
+import torch
 import yaml
 
 # -- Ray Tune -----------------------------------------------------------------
@@ -33,6 +33,7 @@ from bindcore.engine.trainer import bindcore_Trainer, get_config
 # -----------------------------------------------------------------------------
 
 FEATURE_SETS: dict[str, list[str]] = {
+    "plm_only": [""],
     "scalar_only": ["scalar_features"],
     "scalar_local": ["scalar_features", "local_features"],
     "scalar_local_pairwise": ["scalar_features", "local_features", "pairwise_features"],
@@ -343,7 +344,13 @@ def main() -> None:
     parser.add_argument("--num-seeds", type=int, default=2)
     parser.add_argument("--output-dir", default="./ray_results")
     parser.add_argument("--exp-name", default="core_MoRF_hpo_two_seeds_V3")
+    parser.add_argument(
+        "--limit-VRAM", action="store_true", help="Limit GPU memory to 40%%"
+    )
     args = parser.parse_args()
+
+    if args.limit_VRAM:
+        torch.cuda.set_per_process_memory_fraction(0.4)
 
     # -- Load the single YAML -------------------------------------------------
     search_space_path = Path(args.search_space).resolve()
