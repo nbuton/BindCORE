@@ -26,7 +26,7 @@ from tqdm import tqdm
 import pandas as pd
 from torch.utils.data import DataLoader, Subset
 from torch.optim.lr_scheduler import SequentialLR, LinearLR, CosineAnnealingLR
-from popriskmin import PRM
+# from popriskmin import PRM
 
 from bindcore.config import FullConfig
 from bindcore.data.datasets import ProteinDataset, collate_proteins
