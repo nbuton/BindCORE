@@ -336,7 +336,7 @@ def main() -> None:
         ),
     )
     parser.add_argument("--device", default="cuda")
-    parser.add_argument("--num-samples", type=int, default=250)
+    parser.add_argument("--num-samples", type=int, default=100)
     parser.add_argument("--max-epochs", type=int, default=20)
     parser.add_argument("--cpus-per-trial", type=float, default=4.0)
     parser.add_argument("--gpus-per-trial", type=float, default=1.0)
