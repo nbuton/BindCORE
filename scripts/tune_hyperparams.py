@@ -33,11 +33,11 @@ from bindcore.engine.trainer import bindcore_Trainer, get_config
 # -----------------------------------------------------------------------------
 
 FEATURE_SETS: dict[str, list[str]] = {
-    "plm_only": [""],
+    "plm_only": ["plm_embedding"],
     "scalar_only": ["scalar_features"],
     "scalar_local": ["scalar_features", "local_features"],
     "scalar_local_pairwise": ["scalar_features", "local_features", "pairwise_features"],
-    "all": [
+    "all_structural": [
         "token_embedding",
         "positional_embeddings",
         "scalar_features",
