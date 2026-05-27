@@ -26,6 +26,7 @@ from tqdm import tqdm
 import pandas as pd
 from torch.utils.data import DataLoader, Subset
 from torch.optim.lr_scheduler import SequentialLR, LinearLR, CosineAnnealingLR
+
 # from popriskmin import PRM
 
 from bindcore.config import FullConfig
@@ -246,6 +247,7 @@ class bindcore_Trainer:
         print(f"  ✓ Checkpoint saved {suffix} → {self.model_save_path}")
 
     def run(self):
+        eval_mode = "normal"
         self.prepare_loaders()
         self.build_model()
         self.build_criterion()
@@ -256,15 +258,15 @@ class bindcore_Trainer:
                 lr=self.train_cfg.lr,
                 weight_decay=self.train_cfg.weight_decay,
             )
-        elif self.train_cfg.optimizer == "PRM":
-            self.optimizer = PRM(
-                self.model.parameters(),
-                lr=self.train_cfg.lr,
-                weight_decay=self.train_cfg.weight_decay,
-                softness=1.0,
-                warmup_steps=32,
-                rho=0.99,
-            )
+        # elif self.train_cfg.optimizer == "PRM":
+        #     self.optimizer = PRM(
+        #         self.model.parameters(),
+        #         lr=self.train_cfg.lr,
+        #         weight_decay=self.train_cfg.weight_decay,
+        #         softness=1.0,
+        #         warmup_steps=32,
+        #         rho=0.99,
+        #     )
         else:
             raise ValueError(f"Unknown {self.train_cfg.optimizer} optimizer type")
 
@@ -386,7 +388,10 @@ class bindcore_Trainer:
             # Penalize peaks that happen in the first 20% of training
             total_epochs = len(self.history["val_pr_auc"])
             earliness_penalty = max(0, 0.2 - peak_epoch / total_epochs) * peak_value
-            return sustained_peak - earliness_penalty
+            if eval_mode == "sustain":
+                return sustained_peak - earliness_penalty
+            else:
+                return peak_epoch
         else:
             print("Empty validation so no value to optimize")
             return None
