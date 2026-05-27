@@ -15,7 +15,7 @@ from bindcore.plm_embedding.utils import get_model_wrapper
 def main():
     parser = argparse.ArgumentParser(description="FASTA to H5 Protein Embedding Tool")
     parser.add_argument("--input", required=True, help="Path to input FASTA")
-    parser.add_argument("--model", default="esmc_600m", help="Model name")
+    parser.add_argument("--model", default="esm3-large-2024-03", help="Model name")
     parser.add_argument("--token_file", default="data/forge_token.txt")
     parser.add_argument("--layer", type=int, default=-1)
     parser.add_argument("--device", default="cuda")

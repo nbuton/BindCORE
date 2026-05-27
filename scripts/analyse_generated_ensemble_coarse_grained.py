@@ -26,7 +26,9 @@ Checks implemented
 All thresholds are documented constants at the top of the file.
 """
 
+import argparse
 import os
+import random
 import sys
 import warnings
 import numpy as np
@@ -48,9 +50,6 @@ warnings.filterwarnings("ignore")
 #  CONFIGURATION  –  edit these to tune thresholds
 # ══════════════════════════════════════════════════════════════════════════════
 
-DATA_ROOT = Path("data/conformational_ensemble/IDPFold2")
-OUTPUT_DIR = Path("results_cg")
-OUTPUT_DIR.mkdir(exist_ok=True)
 
 # ── 1. Sequential Cα–Cα virtual bond ─────────────────────────────────────────
 CA_BOND_IDEAL = 3.81  # Å  (peptide bond geometry → Cα–Cα)
@@ -306,9 +305,18 @@ def shape_descriptors(pos: np.ndarray, ag):
 # ══════════════════════════════════════════════════════════════════════════════
 
 
-def analyse_protein(protein_dir: Path):
-    top = protein_dir / "topology.pdb"
-    dcd = protein_dir / "traj.dcd"
+def analyse_protein(protein_dir: Path, source: str):
+    if source == "IDPFold2":
+        top = protein_dir / "topology.pdb"
+        dcd = protein_dir / "traj.dcd"
+    elif source == "AF-CALVADOS":
+        protein_id = protein_dir.stem
+        top = protein_dir / "top.pdb"
+        dcd = protein_dir / (protein_id + ".dcd")
+    elif source == "STARLING":
+        raise NotImplementedError
+    else:
+        raise ValueError("source unknown")
 
     if not top.exists() or not dcd.exists():
         print(f"  [SKIP] Missing files in {protein_dir.name}")
@@ -377,15 +385,44 @@ def analyse_protein(protein_dir: Path):
 
 
 def main():
-    if not DATA_ROOT.exists():
-        sys.exit(f"Data root not found: {DATA_ROOT}\n" "Run from your project root.")
+    # 1. Setup Argument Parser
+    parser = argparse.ArgumentParser(
+        description="Process conformational ensemble data."
+    )
+    parser.add_argument(
+        "--input_dir",
+        type=str,
+        default="data/conformational_ensemble/IDPFold2",
+        help="Path to the data root directory",
+    )
+    parser.add_argument(
+        "--limit_n_prot",
+        type=int,
+        default=100,
+        help="Maximum number of protein directories to process (default: 100)",
+    )
+    parser.add_argument(
+        "--source", type=str, required=True, help="Source identifier for analysis"
+    )
+    args = parser.parse_args()
 
-    protein_dirs = sorted(d for d in DATA_ROOT.iterdir() if d.is_dir())
+    # 2. Use the arguments
+    DATA_ROOT = Path(args.input_dir)
+    OUTPUT_DIR = Path("data/conformations_analysis/")
+    OUTPUT_DIR.mkdir(exist_ok=True)
+
+    if not DATA_ROOT.exists():
+        sys.exit(f"Data root not found: {DATA_ROOT}\nRun from your project root.")
+
+    random.seed(42)
+    all_protein_dirs = [d for d in DATA_ROOT.iterdir() if d.is_dir()]
+    n_to_sample = min(args.limit_n_prot, len(all_protein_dirs))
+    protein_dirs = random.sample(all_protein_dirs, n_to_sample)
     print(f"Found {len(protein_dirs)} directories under {DATA_ROOT}\n")
 
     all_rows = []
-    for pdir in tqdm(protein_dirs[:100]):
-        all_rows.extend(analyse_protein(pdir))
+    for pdir in tqdm(protein_dirs[: args.limit_n_prot]):
+        all_rows.extend(analyse_protein(pdir, source=args.source))
 
     if not all_rows:
         sys.exit("No data collected.")
@@ -536,7 +573,7 @@ def main():
     report = "\n".join(lines)
     print("\n" + report)
 
-    rep_path = OUTPUT_DIR / "report.txt"
+    rep_path = OUTPUT_DIR / ("report_cg_" + args.source + ".txt")
     with open(rep_path, "w") as f:
         f.write(report + "\n")
     print(f"\nReport → {rep_path}")

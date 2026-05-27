@@ -1,294 +1,462 @@
 """
 Geometric Viability Analysis for IDP Conformational Ensembles
 =============================================================
-Analyses aa_traj.dcd + top_AA.pdb files across all protein folders.
+Analyses trajectory files across all protein folders.
 
 Checks per frame:
-  1. Bond lengths  – all covalent bonds within biologically plausible limits
-  2. Bond angles   – peptide backbone angles within chemically sane ranges
-  3. Clashes       – no two heavy atoms closer than a hard VdW floor
-  4. Ramachandran  – phi/psi in allowed regions (broad + strict G-factors)
-  5. Omega (ω)     – peptide-bond planarity (|ω| within 30° of 180°)
+  1. Bond lengths  – covalent bonds within biologically plausible limits
+                     (reports mean bad ratio; frame-level pass uses a
+                      tolerance of MAX_BOND_BAD_RATIO)
+  2. Bond angles   – peptide backbone N-CA-C angles within sane ranges
+  3. Clashes       – steric clashes using VdW-radius overlap criterion
+                     (1-2, 1-3 and 1-4 bonded pairs are excluded)
+  4. Ramachandran  – phi/psi in allowed regions using polygon-based
+                     definitions that include alpha, beta, PPII and left-
+                     handed helical regions (important for IDPs)
+  5. Omega (ω)     – peptide-bond planarity computed residue-by-residue
+                     to avoid index-mismatch bugs across chain breaks
 
-Outputs:
-  - results_summary.csv   : per-protein aggregate statistics
-  - results_per_frame.csv : every (protein, frame) row
-  - report.txt            : human-readable summary
+Design goals
+------------
+- Suitable for IDP/IDR ensembles: lenient but physically meaningful
+  thresholds, PPII region included, soft frame-level pass criteria.
+- Scale to ~2 000 proteins × ~1 000 frames each without running out of
+  memory: trajectory frames are processed one at a time and results are
+  streamed to disk in chunks.
+- Parallel execution: one worker process per protein via
+  multiprocessing.Pool with a configurable number of workers.
+- Supports multiple upstream sources (IDPFold2, AF-CALVADOS, STARLING).
+- Outputs: results_per_frame.csv, results_summary.csv, report_<source>.txt
+
+Usage
+-----
+python analyse_generated_ensemble_full_atom.py \
+    --input_dir  data/conformational_ensemble/AF-CALVADOS \
+    --source     AF-CALVADOS \
+    --limit_n_prot 2000 \
+    --workers    8 \
+    --chunk_size 500
 """
 
+from __future__ import annotations
+
+import argparse
 import os
+import random
 import sys
 import warnings
+import multiprocessing as mp
+from functools import partial
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
-from pathlib import Path
-from collections import defaultdict
-
 from tqdm import tqdm
 
-# ── MDAnalysis ──────────────────────────────────────────────────────────────
-try:
-    import MDAnalysis as mda
-    from MDAnalysis.analysis import dihedrals
-    from MDAnalysis.lib.distances import calc_bonds, calc_angles
-    from MDAnalysis.topology.guessers import guess_bonds as _guess_bonds
-except ImportError:
-    sys.exit("MDAnalysis not found. Install with:  pip install MDAnalysis")
+
+import MDAnalysis as mda
+from MDAnalysis.analysis import dihedrals as mda_dihedrals
+from MDAnalysis.lib.distances import self_distance_array
 
 warnings.filterwarnings("ignore")
 
-# ── Configuration ────────────────────────────────────────────────────────────
-DATA_ROOT = Path("data/conformational_ensemble/IDPFold2")
-OUTPUT_DIR = Path("results_ensemble")
-OUTPUT_DIR.mkdir(exist_ok=True)
+# ═══════════════════════════════════════════════════════════════════════════════
+# Configuration / thresholds
+# ═══════════════════════════════════════════════════════════════════════════════
 
-# ── Bond-length limits (Å) ──────────────────────────────────────────────────
-# Values are [min, max] for each bond type; generous tolerances for cg2all output.
-BOND_LIMITS = {
-    # Backbone
-    "N-CA": (1.30, 1.60),
-    "CA-C": (1.42, 1.65),
-    "C-N": (1.25, 1.55),  # peptide bond (resonance: ~1.33 ideal)
-    "C-O": (1.15, 1.35),  # carbonyl
-    "CA-CB": (1.40, 1.65),
-    # Hydrogen-containing bonds (if H present)
-    "N-H": (0.85, 1.15),
-    "CA-HA": (0.85, 1.15),
+# ── Bond lengths (Å) ──────────────────────────────────────────────────────────
+# Keyed by sorted element-pair string, e.g. "C-N".
+# Ranges are intentionally generous to accommodate cg2all reconstruction
+# artefacts; the important thing is catching truly unphysical bonds.
+BOND_LIMITS: dict[str, tuple[float, float]] = {
+    "C-C": (1.38, 1.68),
+    "C-N": (1.22, 1.58),
+    "C-O": (1.12, 1.38),
+    "C-S": (1.68, 1.98),
+    "N-N": (1.18, 1.52),
+    "N-O": (1.18, 1.50),
+    "O-S": (1.40, 1.70),
+    "S-S": (1.90, 2.15),
+    # Bonds involving hydrogen
     "C-H": (0.85, 1.15),
-    "O-H": (0.85, 1.05),
-    "S-H": (1.20, 1.45),
-    # Heavy-atom generic fallback
-    "C-C": (1.40, 1.65),
-    "C-N": (1.25, 1.55),
-    "C-O": (1.15, 1.35),
-    "C-S": (1.70, 1.95),
-    "N-N": (1.20, 1.50),
-    "S-S": (1.95, 2.10),
+    "H-N": (0.85, 1.15),
+    "H-O": (0.85, 1.05),
+    "H-S": (1.20, 1.45),
 }
-# Absolute max for ANY covalent bond (catch gross errors)
-BOND_ABSOLUTE_MAX = 2.20  # Å
-BOND_ABSOLUTE_MIN = 0.70  # Å
+BOND_ABSOLUTE_MIN = 0.70  # Å – below this is always wrong
+BOND_ABSOLUTE_MAX = 2.20  # Å – above this is always wrong
 
-# Clash detection: minimum allowed distance between bonded-1,3 heavy atoms
-CLASH_DIST = 1.50  # Å  (non-bonded heavy atoms)
-VDW_CLASH_PAIRS_SKIP = 3  # skip 1-2 and 1-3 pairs
+# A frame is considered to pass the bond-length check if the fraction of
+# out-of-range bonds is below this threshold (1 % tolerance).
+MAX_BOND_BAD_RATIO = 0.01
 
-# Angle limits (degrees)
-ANGLE_NCA_C = (90.0, 140.0)  # N-CA-C backbone
-ANGLE_CA_C_N = (100.0, 135.0)  # CA-C-N
-ANGLE_C_N_CA = (105.0, 135.0)  # C-N-CA
+# ── Clash detection ───────────────────────────────────────────────────────────
+# Two heavy atoms clash when their centre-to-centre distance is less than
+#   (R_vdw_i + R_vdw_j) * CLASH_OVERLAP_FACTOR
+# 1-2, 1-3 and optionally 1-4 bonded pairs are excluded.
+# Values from Bondi (1964) / CHARMM36 rounded for use here.
+VDW_RADII: dict[str, float] = {
+    "C": 1.70,
+    "N": 1.55,
+    "O": 1.52,
+    "S": 1.80,
+    "P": 1.80,
+    "F": 1.47,
+    "CL": 1.75,
+    "BR": 1.85,
+    "I": 1.98,
+    "H": 1.20,
+}
+VDW_DEFAULT_RADIUS = 1.70  # Å – fallback for unknown elements
+CLASH_OVERLAP_FACTOR = 0.70  # allow 30 % vdW overlap (generous for IDPs)
+EXCLUDE_14_PAIRS = True  # if True, also skip 1-4 bonded pairs
 
-# Omega (peptide plane) limit: |ω - 180| < threshold (also proline cis ~0°)
-OMEGA_TRANS_TOL = 30.0  # degrees from 180
+# ── Backbone angles (degrees) ─────────────────────────────────────────────────
+ANGLE_NCA_C_MIN = 88.0
+ANGLE_NCA_C_MAX = 142.0
 
-# Ramachandran regions (broad, Lovell 2003 / Richardson)
-# Precomputed polygons are expensive; use simple rectangular "allowed zones"
-RAMA_REGIONS = [
-    # (phi_min, phi_max, psi_min, psi_max, label)
-    (-180, -30, -180, -100, "beta"),
-    (-180, -30, 50, 180, "beta"),
-    (-170, -30, -100, 50, "alpha"),
-    (-90, -30, -60, 60, "alpha"),
-    (30, 180, 30, 180, "gamma_left"),
-    (30, 180, -180, -30, "gamma_left"),
+# ── Omega (ω) planarity ───────────────────────────────────────────────────────
+OMEGA_TRANS_TOL_DEG = 35.0  # |ω| must be within 35° of 180°
+OMEGA_CIS_PRO_TOL_DEG = 40.0  # cis-Pro: |ω| < 40° counts as cis
+
+# ── Ramachandran allowed regions ──────────────────────────────────────────────
+# Polygon-based, expressed as lists of (phi, psi) vertex pairs.
+# For speed we use the bounding-box first pass, then point-in-polygon.
+# Regions cover: α-helix, β-sheet, PPII, left-handed helix.
+# These match the "broad allowed" outlines of Lovell et al. 2003 / MolProbity.
+RAMA_POLYGONS: list[tuple[str, list[tuple[float, float]]]] = [
+    (
+        "alpha_R",
+        [(-170, -10), (-30, -10), (-30, -90), (-80, -90), (-80, -65), (-170, -65)],
+    ),
+    # Extended beta / PPII combined
+    (
+        "beta_PPII",
+        [
+            (-180, 180),
+            (-30, 180),
+            (-30, 80),
+            (-180, 80),
+            (-180, -100),
+            (-30, -100),
+            (-30, -180),
+            (-180, -180),
+        ],
+    ),
+    # Left-handed helix (populated in Gly and some IDP loops)
+    ("alpha_L", [(30, 90), (90, 90), (90, 20), (30, 20)]),
+    # Gamma turn region
+    ("gamma", [(-180, -100), (-30, -100), (-30, -170), (-180, -170)]),
 ]
 
-# ── Helpers ──────────────────────────────────────────────────────────────────
+# Fraction of residues in disallowed Ramachandran regions above which a
+# frame is flagged (5 % tolerance – IDPs legitimately sample borders).
+MAX_RAMA_DISALLOWED_RATIO = 0.05
+
+# ── Frame-level pass: maximum allowed fraction of bad ω angles ────────────────
+MAX_OMEGA_BAD_RATIO = 0.05
+
+# ── Output chunk size (rows written at once) ──────────────────────────────────
+DEFAULT_CHUNK_SIZE = 500
 
 
-def get_bond_key(name1: str, name2: str) -> str:
-    """Return a lookup key for BOND_LIMITS given two atom names."""
-
-    def _elem(n):
-        return n[0]  # first char is element for standard PDB names
-
-    e1, e2 = _elem(name1), _elem(name2)
-    pair = tuple(sorted([e1, e2]))
-    return f"{pair[0]}-{pair[1]}"
+# ═══════════════════════════════════════════════════════════════════════════════
+# Geometry helpers
+# ═══════════════════════════════════════════════════════════════════════════════
 
 
-def ensure_bonds(u):
+def _elem(atom_name: str) -> str:
+    """Best-effort element from PDB atom name (works for standard names)."""
+    cleaned = atom_name.strip().lstrip("0123456789")
+    if len(cleaned) >= 2 and cleaned[:2].upper() in ("CL", "BR"):
+        return cleaned[:2].upper()
+    return cleaned[0].upper() if cleaned else "C"
+
+
+def _bond_key(n1: str, n2: str) -> str:
+    e1, e2 = _elem(n1), _elem(n2)
+    return "-".join(sorted([e1, e2]))
+
+
+def _point_in_polygon(px: float, py: float, polygon: list[tuple[float, float]]) -> bool:
+    """Ray-casting point-in-polygon test (2-D)."""
+    n = len(polygon)
+    inside = False
+    x, y = px, py
+    j = n - 1
+    for i in range(n):
+        xi, yi = polygon[i]
+        xj, yj = polygon[j]
+        if ((yi > y) != (yj > y)) and (
+            x < (xj - xi) * (y - yi) / (yj - yi + 1e-12) + xi
+        ):
+            inside = not inside
+        j = i
+    return inside
+
+
+def _in_allowed_rama(phi: float, psi: float) -> bool:
+    """Return True if (phi, psi) falls inside any allowed polygon."""
+    for _label, poly in RAMA_POLYGONS:
+        if _point_in_polygon(phi, psi, poly):
+            return True
+    return False
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Per-Universe bond topology cache (built once per protein)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class BondCache:
     """
-    Guarantee the Universe has bond topology.
-    PDB topology files often lack CONECT records, so we guess bonds from
-    the first-frame geometry + standard vdW radii when needed.
-    Returns a cache tuple (idx, lo_arr, hi_arr) built once per protein.
+    Pre-computed bond information for a Universe.
+
+    Attributes
+    ----------
+    idx        : (N, 2) int array of atom indices
+    lo, hi     : (N,) float arrays of allowed [min, max] bond lengths
+    excl_pairs : set of frozenset({i, j}) – pairs to skip in clash detection
     """
-    try:
-        _ = u.bonds  # raises NoDataError if absent
-        bonds = u.bonds
-    except Exception:
+
+    def __init__(self, u: mda.Universe):
+        self.idx = None
+        self.lo = None
+        self.hi = None
+        self.excl_pairs: set[frozenset] = set()
+        self._build(u)
+
+    def _build(self, u: mda.Universe):
+        # ── Ensure topology has bonds ────────────────────────────────────────
         try:
-            u.trajectory[0]
-            guessed = _guess_bonds(u.atoms, u.atoms.positions, vdwradii=None)
-            u.add_TopologyAttr("bonds", guessed)
             bonds = u.bonds
-        except Exception:
-            return None, None, None
+            if len(bonds) == 0:
+                raise AttributeError
+        except (AttributeError, Exception):
+            try:
+                from MDAnalysis.topology.guessers import guess_bonds
 
-    if len(bonds) == 0:
-        return None, None, None
+                u.trajectory[0]
+                guessed = guess_bonds(u.atoms, u.atoms.positions, vdwradii=None)
+                u.add_TopologyAttr("bonds", guessed)
+                bonds = u.bonds
+            except Exception:
+                return  # give up – checks will be skipped
 
-    idx = bonds.indices.copy()  # (N,2) int array
-    names1 = np.array([b.atoms[0].name for b in bonds])
-    names2 = np.array([b.atoms[1].name for b in bonds])
+        if len(bonds) == 0:
+            return
 
-    lo_arr = np.empty(len(bonds))
-    hi_arr = np.empty(len(bonds))
-    for i, (n1, n2) in enumerate(zip(names1, names2)):
-        key = get_bond_key(n1, n2)
-        lo, hi = BOND_LIMITS.get(key, (BOND_ABSOLUTE_MIN, BOND_ABSOLUTE_MAX))
-        lo_arr[i] = max(lo, BOND_ABSOLUTE_MIN)
-        hi_arr[i] = min(hi, BOND_ABSOLUTE_MAX)
+        raw_idx = bonds.indices.copy()  # (N, 2)
+        names = np.array([[b.atoms[0].name, b.atoms[1].name] for b in bonds])
 
-    return idx, lo_arr, hi_arr
+        lo = np.empty(len(bonds))
+        hi = np.empty(len(bonds))
+        for i, (n1, n2) in enumerate(names):
+            key = _bond_key(n1, n2)
+            _lo, _hi = BOND_LIMITS.get(key, (BOND_ABSOLUTE_MIN, BOND_ABSOLUTE_MAX))
+            lo[i] = max(_lo, BOND_ABSOLUTE_MIN)
+            hi[i] = min(_hi, BOND_ABSOLUTE_MAX)
+
+        self.idx = raw_idx
+        self.lo = lo
+        self.hi = hi
+
+        # ── Build exclusion set for clash detection ─────────────────────────
+        # 1-2 pairs (direct bonds)
+        for a, b in raw_idx:
+            self.excl_pairs.add(frozenset({int(a), int(b)}))
+
+        # 1-3 pairs (shared neighbour)
+        adj: dict[int, set[int]] = {}
+        for a, b in raw_idx:
+            adj.setdefault(int(a), set()).add(int(b))
+            adj.setdefault(int(b), set()).add(int(a))
+
+        for center, neighbours in adj.items():
+            nb_list = list(neighbours)
+            for i in range(len(nb_list)):
+                for j in range(i + 1, len(nb_list)):
+                    self.excl_pairs.add(frozenset({nb_list[i], nb_list[j]}))
+
+        # 1-4 pairs (optional)
+        if EXCLUDE_14_PAIRS:
+            for center, neighbours in adj.items():
+                for nb in neighbours:
+                    for nb2 in adj.get(nb, set()):
+                        if nb2 != center:
+                            self.excl_pairs.add(frozenset({center, nb2}))
+
+    @property
+    def valid(self) -> bool:
+        return self.idx is not None
 
 
-def check_bond_lengths(u, bond_cache):
+# ═══════════════════════════════════════════════════════════════════════════════
+# Per-frame check functions
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def check_bond_lengths(
+    positions: np.ndarray, cache: BondCache
+) -> tuple[int, int, int, float, bool]:
     """
-    bond_cache = (idx, lo_arr, hi_arr) from ensure_bonds().
     Returns (n_bonds, n_ok, n_bad, bad_ratio, frame_ok).
+    frame_ok is True when bad_ratio <= MAX_BOND_BAD_RATIO.
     """
-    idx, lo_arr, hi_arr = bond_cache
-    if idx is None:
-        return 0, 0, 0, float("nan"), True  # can't check → don't penalise
+    if not cache.valid:
+        return 0, 0, 0, float("nan"), True
 
-    pos = u.atoms.positions
-    p1 = pos[idx[:, 0]]
-    p2 = pos[idx[:, 1]]
+    p1 = positions[cache.idx[:, 0]]
+    p2 = positions[cache.idx[:, 1]]
     lengths = np.linalg.norm(p2 - p1, axis=1)
 
-    ok = (lengths >= lo_arr) & (lengths <= hi_arr)
-    n_bonds = len(idx)
+    ok = (lengths >= cache.lo) & (lengths <= cache.hi)
+    n_bonds = len(cache.idx)
     n_ok = int(ok.sum())
     n_bad = n_bonds - n_ok
     bad_ratio = n_bad / n_bonds
-    frame_ok = n_bad == 0
+    frame_ok = bad_ratio <= MAX_BOND_BAD_RATIO
     return n_bonds, n_ok, n_bad, bad_ratio, frame_ok
 
 
-def check_backbone_angles(u):
-    """Return fraction of backbone angles within allowed ranges."""
-    try:
-        backbone = u.select_atoms("backbone")
-        if len(backbone) < 3:
-            return float("nan"), True
-
-        # N-CA-C angles
-        n_atoms = backbone.select_atoms("name N")
-        ca_atoms = backbone.select_atoms("name CA")
-        c_atoms = backbone.select_atoms("name C")
-
-        n_res = min(len(n_atoms), len(ca_atoms), len(c_atoms))
-        if n_res == 0:
-            return float("nan"), True
-
-        bad = 0
-        total = 0
-        for i in range(n_res):
-            try:
-                p_n = n_atoms[i].position
-                p_ca = ca_atoms[i].position
-                p_c = c_atoms[i].position
-                v1 = p_n - p_ca
-                v2 = p_c - p_ca
-                cos_a = np.dot(v1, v2) / (
-                    np.linalg.norm(v1) * np.linalg.norm(v2) + 1e-9
-                )
-                angle = np.degrees(np.arccos(np.clip(cos_a, -1, 1)))
-                lo, hi = ANGLE_NCA_C
-                total += 1
-                if not (lo <= angle <= hi):
-                    bad += 1
-            except Exception:
-                pass
-
-        frac_bad = bad / total if total else float("nan")
-        frame_ok = bad == 0
-        return frac_bad, frame_ok
-    except Exception:
+def check_backbone_angles(residues) -> tuple[float, bool]:
+    """
+    N-CA-C angle for every residue.
+    Returns (frac_bad, frame_ok).
+    """
+    bad = 0
+    total = 0
+    for res in residues:
+        try:
+            n = res.atoms.select_atoms("name N")[0].position
+            ca = res.atoms.select_atoms("name CA")[0].position
+            c = res.atoms.select_atoms("name C")[0].position
+            v1 = n - ca
+            v2 = c - ca
+            cos_a = np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2) + 1e-9)
+            angle = np.degrees(np.arccos(np.clip(cos_a, -1.0, 1.0)))
+            total += 1
+            if not (ANGLE_NCA_C_MIN <= angle <= ANGLE_NCA_C_MAX):
+                bad += 1
+        except (IndexError, Exception):
+            pass
+    if total == 0:
         return float("nan"), True
+    frac_bad = bad / total
+    return frac_bad, frac_bad == 0.0
 
 
-def check_clashes(u):
-    """Detect steric clashes among heavy atoms (non-bonded pairs < CLASH_DIST Å)."""
-    try:
-        heavy = u.select_atoms("not name H*")
-        if len(heavy) < 2:
-            return 0, True
+def check_clashes(heavy_atoms, cache: BondCache) -> tuple[int, bool]:
+    """
+    Count steric clashes among heavy atoms using VdW-radius overlap,
+    properly excluding 1-2, 1-3 (and optionally 1-4) bonded pairs.
 
-        from MDAnalysis.lib.distances import self_distance_array
-
-        dists = self_distance_array(heavy.positions)
-        n_clashes = int((dists < CLASH_DIST).sum())
-        # Divide by 2 not needed; self_distance_array returns upper triangle
-        frame_ok = n_clashes == 0
-        return n_clashes, frame_ok
-    except Exception:
+    Returns (n_clashes, clash_free).
+    """
+    positions = heavy_atoms.positions
+    n = len(positions)
+    if n < 2:
         return 0, True
 
+    # Build per-atom VdW radii array
+    radii = np.array(
+        [VDW_RADII.get(_elem(a.name), VDW_DEFAULT_RADIUS) for a in heavy_atoms]
+    )
 
-def check_omega(u):
-    """Fraction of omega (ω) angles that deviate > OMEGA_TRANS_TOL from 180°."""
-    try:
-        rama = dihedrals.Ramachandran(u.select_atoms("protein")).run()
-        # rama.results.angles shape: (n_frames, n_residues, 2) → phi, psi
-        # Omega is not directly in Ramachandran; use manual calc
-        backbone = u.select_atoms("backbone")
-        c_atoms = [a for a in backbone if a.name == "C"]
-        n_atoms = [a for a in backbone if a.name == "N"]
+    # Map heavy-atom local index → Universe atom index
+    heavy_indices = heavy_atoms.indices  # shape (n,)
 
-        n_omega = 0
-        n_bad_omega = 0
-        for i in range(len(c_atoms) - 1):
-            try:
-                # ω = CA(i)-C(i)-N(i+1)-CA(i+1)
-                ca_i = c_atoms[i].residue.atoms.select_atoms("name CA")[0]
-                c_i = c_atoms[i]
-                n_i1 = n_atoms[i + 1] if i + 1 < len(n_atoms) else None
-                if n_i1 is None:
-                    continue
-                ca_i1 = n_i1.residue.atoms.select_atoms("name CA")
-                if len(ca_i1) == 0:
-                    continue
-                ca_i1 = ca_i1[0]
+    # Upper-triangle pairwise distances
+    dists = self_distance_array(positions)  # length n*(n-1)/2
 
-                pts = np.array(
-                    [ca_i.position, c_i.position, n_i1.position, ca_i1.position]
-                )
-                b1 = pts[1] - pts[0]
-                b2 = pts[2] - pts[1]
-                b3 = pts[3] - pts[2]
-                n1 = np.cross(b1, b2)
-                n2 = np.cross(b2, b3)
-                m1 = np.cross(n1, b2 / (np.linalg.norm(b2) + 1e-9))
-                x = np.dot(n1, n2)
-                y = np.dot(m1, n2)
-                omega = np.degrees(np.arctan2(y, x))
+    n_clashes = 0
+    k = 0
+    for i in range(n - 1):
+        for j in range(i + 1, n):
+            pair = frozenset({int(heavy_indices[i]), int(heavy_indices[j])})
+            if pair not in cache.excl_pairs:
+                min_dist = (radii[i] + radii[j]) * CLASH_OVERLAP_FACTOR
+                if dists[k] < min_dist:
+                    n_clashes += 1
+            k += 1
 
-                n_omega += 1
-                dev = abs(abs(omega) - 180.0)
-                # Allow cis-proline (~0°)
-                is_cis_pro = (
-                    c_atoms[i].residue.resname == "PRO" or n_i1.residue.resname == "PRO"
-                ) and abs(omega) < 30
-                if dev > OMEGA_TRANS_TOL and not is_cis_pro:
-                    n_bad_omega += 1
-            except Exception:
-                pass
+    return n_clashes, n_clashes == 0
 
-        frac_bad = n_bad_omega / n_omega if n_omega else float("nan")
-        frame_ok = n_bad_omega == 0
-        return frac_bad, n_omega, frame_ok
-    except Exception:
+
+def check_omega(residues) -> tuple[float, int, bool]:
+    """
+    Compute ω = CA(i)-C(i)-N(i+1)-CA(i+1) for consecutive residue pairs
+    using residue objects directly (avoids list-index mismatches at chain
+    breaks).
+
+    Returns (frac_bad, n_checked, frame_ok).
+    frame_ok is True when frac_bad <= MAX_OMEGA_BAD_RATIO.
+    """
+    res_list = list(residues)
+    n_bad = 0
+    n_checked = 0
+
+    for i in range(len(res_list) - 1):
+        ri = res_list[i]
+        ri1 = res_list[i + 1]
+
+        # Only consider consecutive residues in the same chain
+        if ri.segid != ri1.segid:
+            continue
+        if ri1.resid - ri.resid != 1:
+            continue
+
+        try:
+            ca_i = ri.atoms.select_atoms("name CA")[0].position
+            c_i = ri.atoms.select_atoms("name C")[0].position
+            n_i1 = ri1.atoms.select_atoms("name N")[0].position
+            ca_i1 = ri1.atoms.select_atoms("name CA")[0].position
+        except IndexError:
+            continue
+
+        b1 = c_i - ca_i
+        b2 = n_i1 - c_i
+        b3 = ca_i1 - n_i1
+
+        n1 = np.cross(b1, b2)
+        n2 = np.cross(b2, b3)
+        b2_norm = b2 / (np.linalg.norm(b2) + 1e-9)
+        m1 = np.cross(n1, b2_norm)
+
+        x = np.dot(n1, n2)
+        y = np.dot(m1, n2)
+        omega = np.degrees(np.arctan2(y, x))
+
+        n_checked += 1
+        dev_from_trans = abs(abs(omega) - 180.0)
+
+        # Allow cis-proline
+        is_next_pro = ri1.resname == "PRO"
+        if is_next_pro and abs(omega) < OMEGA_CIS_PRO_TOL_DEG:
+            continue  # valid cis-Pro
+
+        if dev_from_trans > OMEGA_TRANS_TOL_DEG:
+            n_bad += 1
+
+    if n_checked == 0:
         return float("nan"), 0, True
 
+    frac_bad = n_bad / n_checked
+    frame_ok = frac_bad <= MAX_OMEGA_BAD_RATIO
+    return frac_bad, n_checked, frame_ok
 
-def check_ramachandran(u):
-    """Fraction of residues in disallowed Ramachandran regions."""
+
+def check_ramachandran(protein_ag) -> tuple[float, bool]:
+    """
+    Compute phi/psi using MDAnalysis Ramachandran, then classify each
+    residue using the polygon-based allowed regions (alpha, beta/PPII,
+    left-handed helix).
+
+    Returns (frac_disallowed, frame_ok).
+    frame_ok is True when frac_disallowed <= MAX_RAMA_DISALLOWED_RATIO.
+    """
     try:
-        protein = u.select_atoms("protein")
-        rama_run = dihedrals.Ramachandran(protein).run()
+        rama_run = mda_dihedrals.Ramachandran(protein_ag).run()
         angles = rama_run.results.angles  # (1, n_res, 2)
         if angles.shape[1] == 0:
             return float("nan"), True
@@ -296,246 +464,374 @@ def check_ramachandran(u):
         phis = angles[0, :, 0]
         psis = angles[0, :, 1]
 
-        allowed = np.zeros(len(phis), dtype=bool)
-        for phi, psi in zip(phis, psis):
-            in_region = False
-            for p1, p2, s1, s2, _ in RAMA_REGIONS:
-                if p1 <= phi <= p2 and s1 <= psi <= s2:
-                    in_region = True
-                    break
-            if in_region:
-                allowed[np.where((phis == phi) & (psis == psi))[0]] = True
-
-        # Simpler: vectorised
-        in_any = np.zeros(len(phis), dtype=bool)
-        for p1, p2, s1, s2, _ in RAMA_REGIONS:
-            mask = (phis >= p1) & (phis <= p2) & (psis >= s1) & (psis <= s2)
-            in_any |= mask
-
         n_res = len(phis)
-        n_disallowed = int((~in_any).sum())
-        frac_disallowed = n_disallowed / n_res if n_res else float("nan")
-        frame_ok = n_disallowed == 0
+        n_disallowed = sum(
+            0 if _in_allowed_rama(phi, psi) else 1 for phi, psi in zip(phis, psis)
+        )
+        frac_disallowed = n_disallowed / n_res
+        frame_ok = frac_disallowed <= MAX_RAMA_DISALLOWED_RATIO
         return frac_disallowed, frame_ok
     except Exception:
         return float("nan"), True
 
 
-# ── Main analysis loop ────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# Per-protein analysis
+# ═══════════════════════════════════════════════════════════════════════════════
 
 
-def analyse_protein(protein_dir: Path):
-    dcd = protein_dir / "aa_traj.dcd"
+def _get_files(protein_dir: Path, source: str) -> tuple[Path | None, Path | None]:
+    """Return (topology_path, trajectory_path) for the given source."""
+    if source == "IDPFold2":
+        for fname in ("top_AA.pdb", "aa_topology.pdb"):
+            top = protein_dir / fname
+            if top.exists():
+                return top, protein_dir / "aa_traj.dcd"
+        return None, protein_dir / "aa_traj.dcd"
 
-    # Define potential topology filenames
-    potential_tops = ["top_AA.pdb", "aa_topology.pdb"]
+    elif source == "AF-CALVADOS":
+        pid = protein_dir.stem
+        return (protein_dir / f"{pid}_allatom.pdb", protein_dir / f"{pid}_allatom.dcd")
 
-    # Find the first one that exists
-    top = next(
-        (protein_dir / f for f in potential_tops if (protein_dir / f).exists()), None
-    )
+    elif source == "STARLING":
+        # Adapt naming convention when known
+        raise NotImplementedError("STARLING file layout not yet configured.")
 
-    if not dcd.exists() or top is None:
-        print(f"  [SKIP] Missing files (DCD or Topology) in {protein_dir.name}")
+    else:
+        raise ValueError(f"Unknown source: {source!r}")
+
+
+def analyse_protein(protein_dir: Path, source: str) -> list[dict]:
+    """
+    Analyse every frame of one protein trajectory.
+    Returns a list of row-dicts (one per frame).
+    """
+    top_path, dcd_path = _get_files(protein_dir, source)
+
+    if top_path is None or not top_path.exists() or not dcd_path.exists():
         return []
 
     try:
-        u = mda.Universe(str(top), str(dcd))
+        u = mda.Universe(str(top_path), str(dcd_path))
     except Exception as e:
-        print(f"  [ERROR] Cannot load {protein_dir.name}: {e}")
+        print(f"  [ERROR] {protein_dir.name}: {e}", flush=True)
         return []
 
-    # Build bond cache once from first-frame geometry (topology-independent)
-    bond_cache = ensure_bonds(u)
+    cache = BondCache(u)
+    protein_ag = u.select_atoms("protein")
+    heavy_ag = u.select_atoms("protein and not name H*")
 
     rows = []
-    n_frames = len(u.trajectory)
-    for i in range(n_frames):
-        ts = u.trajectory[i]
+    for ts in u.trajectory:
         fi = ts.frame
-        row = {
-            "protein": protein_dir.name,
-            "frame": fi,
-        }
+        row: dict = {"protein": protein_dir.name, "frame": fi}
 
-        # 1. Bond lengths
-        nb, nok, nbad, bad_ratio, bl_ok = check_bond_lengths(u, bond_cache)
+        positions = u.atoms.positions
+
+        # 1. Bond lengths ─────────────────────────────────────────────────────
+        nb, nok, nbad, bad_ratio, bl_ok = check_bond_lengths(positions, cache)
         row["n_bonds"] = nb
         row["bonds_ok"] = nok
         row["bonds_bad"] = nbad
-        row["bond_bad_ratio"] = round(bad_ratio, 5) if not np.isnan(bad_ratio) else None
+        row["bond_bad_ratio"] = _safe_round(bad_ratio)
         row["frame_bond_ok"] = bl_ok
 
-        # 2. Backbone angles
-        frac_bad_angle, angle_ok = check_backbone_angles(u)
-        row["backbone_angle_frac_bad"] = (
-            round(frac_bad_angle, 5) if not np.isnan(frac_bad_angle) else None
-        )
+        # 2. Backbone angles ───────────────────────────────────────────────────
+        frac_bad_angle, angle_ok = check_backbone_angles(protein_ag.residues)
+        row["backbone_angle_frac_bad"] = _safe_round(frac_bad_angle)
         row["frame_angle_ok"] = angle_ok
 
-        # 3. Clashes
-        n_clashes, clash_ok = check_clashes(u)
+        # 3. Clashes ───────────────────────────────────────────────────────────
+        n_clashes, clash_ok = check_clashes(heavy_ag, cache)
         row["n_clashes"] = n_clashes
         row["frame_clash_ok"] = clash_ok
 
-        # 4. Omega
-        frac_bad_omega, n_omega, omega_ok = check_omega(u)
-        row["omega_frac_bad"] = (
-            round(frac_bad_omega, 5) if not np.isnan(frac_bad_omega) else None
-        )
+        # 4. Omega ─────────────────────────────────────────────────────────────
+        frac_bad_omega, n_omega, omega_ok = check_omega(protein_ag.residues)
+        row["omega_frac_bad"] = _safe_round(frac_bad_omega)
         row["n_omega_checked"] = n_omega
         row["frame_omega_ok"] = omega_ok
 
-        # 5. Ramachandran
-        frac_disallowed, rama_ok = check_ramachandran(u)
-        row["rama_frac_disallowed"] = (
-            round(frac_disallowed, 5) if not np.isnan(frac_disallowed) else None
-        )
+        # 5. Ramachandran ──────────────────────────────────────────────────────
+        frac_disallowed, rama_ok = check_ramachandran(protein_ag)
+        row["rama_frac_disallowed"] = _safe_round(frac_disallowed)
         row["frame_rama_ok"] = rama_ok
 
-        # Overall frame viability (all checks pass)
+        # Overall ──────────────────────────────────────────────────────────────
         row["frame_fully_ok"] = all([bl_ok, angle_ok, clash_ok, omega_ok, rama_ok])
 
         rows.append(row)
+
     return rows
 
 
-def main():
-    if not DATA_ROOT.exists():
-        sys.exit(
-            f"Data root not found: {DATA_ROOT}\n"
-            "Run this script from your project root (~/Documents/my_project/BindCORE)."
-        )
+def _safe_round(v, decimals: int = 5):
+    if v is None or (isinstance(v, float) and np.isnan(v)):
+        return None
+    return round(float(v), decimals)
 
-    protein_dirs = sorted([d for d in DATA_ROOT.iterdir() if d.is_dir()])
-    print(f"Found {len(protein_dirs)} protein directories under {DATA_ROOT}\n")
 
-    all_rows = []
-    for pdir in tqdm(protein_dirs[:50]):
-        rows = analyse_protein(pdir)
-        all_rows.extend(rows)
+# ═══════════════════════════════════════════════════════════════════════════════
+# Worker wrapper (needed for multiprocessing pickling)
+# ═══════════════════════════════════════════════════════════════════════════════
 
-    if not all_rows:
-        sys.exit("No data collected. Check paths and file names.")
 
-    df = pd.DataFrame(all_rows)
-    per_frame_path = OUTPUT_DIR / "results_per_frame.csv"
-    df.to_csv(per_frame_path, index=False)
-    print(f"\nPer-frame results saved → {per_frame_path}")
+def _worker(args: tuple[Path, str]) -> list[dict]:
+    protein_dir, source = args
+    try:
+        return analyse_protein(protein_dir, source)
+    except Exception as exc:
+        print(f"  [WORKER ERROR] {protein_dir.name}: {exc}", flush=True)
+        return []
 
-    # ── Per-protein summary ──────────────────────────────────────────────────
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Summary / report helpers
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def build_summary(df: pd.DataFrame) -> pd.DataFrame:
     grp = df.groupby("protein")
-
     summary = pd.DataFrame(
         {
             "n_frames": grp["frame"].count(),
+            # Bond lengths
             "frames_bond_ok": grp["frame_bond_ok"].sum(),
             "frames_bond_ok_pct": grp["frame_bond_ok"].mean() * 100,
             "mean_bond_bad_ratio": grp["bond_bad_ratio"].mean(),
+            # Backbone angles
             "frames_angle_ok": grp["frame_angle_ok"].sum(),
             "frames_angle_ok_pct": grp["frame_angle_ok"].mean() * 100,
             "mean_angle_frac_bad": grp["backbone_angle_frac_bad"].mean(),
+            # Clashes
             "mean_clashes_per_frame": grp["n_clashes"].mean(),
             "frames_clash_free": grp["frame_clash_ok"].sum(),
             "frames_clash_free_pct": grp["frame_clash_ok"].mean() * 100,
+            # Omega
             "frames_omega_ok": grp["frame_omega_ok"].sum(),
             "frames_omega_ok_pct": grp["frame_omega_ok"].mean() * 100,
             "mean_omega_frac_bad": grp["omega_frac_bad"].mean(),
+            # Ramachandran
             "frames_rama_ok": grp["frame_rama_ok"].sum(),
             "frames_rama_ok_pct": grp["frame_rama_ok"].mean() * 100,
             "mean_rama_frac_disallowed": grp["rama_frac_disallowed"].mean(),
+            # Overall
             "frames_fully_ok": grp["frame_fully_ok"].sum(),
             "frames_fully_ok_pct": grp["frame_fully_ok"].mean() * 100,
         }
     ).round(3)
+    return summary
 
-    summary_path = OUTPUT_DIR / "results_summary.csv"
-    summary.to_csv(summary_path)
-    print(f"Per-protein summary saved → {summary_path}")
 
-    # ── Global statistics ────────────────────────────────────────────────────
+def build_report(df: pd.DataFrame, summary: pd.DataFrame, source: str) -> str:
     n_total = len(df)
     n_proteins = df["protein"].nunique()
     tot_bonds = df["n_bonds"].sum()
-    tot_ok_bonds = df["bonds_ok"].sum()
+    tot_ok = df["bonds_ok"].sum()
 
-    report_lines = [
-        "=" * 70,
+    def pct(num, denom):
+        return f"{100 * num / denom:.2f} %" if denom else "N/A"
+
+    lines = [
+        "=" * 72,
         "  CONFORMATIONAL ENSEMBLE GEOMETRIC VIABILITY REPORT",
-        "=" * 70,
-        f"  Proteins analysed  : {n_proteins}",
-        f"  Total frames       : {n_total}",
+        f"  Source: {source}",
+        "=" * 72,
+        f"  Proteins analysed          : {n_proteins}",
+        f"  Total frames               : {n_total}",
         f"  Total covalent bonds checked: {tot_bonds:,}",
         "",
-        "── BOND LENGTHS ────────────────────────────────────────────────────",
-        (
-            f"  Bonds within limits: {tot_ok_bonds:,} / {tot_bonds:,}  "
-            f"({100 * tot_ok_bonds / tot_bonds:.2f} %)"
-            if tot_bonds
-            else "  N/A"
-        ),
-        f"  Frames ALL bonds OK: "
+        "  Thresholds used",
+        f"    Bond bad ratio (frame pass): ≤ {MAX_BOND_BAD_RATIO*100:.1f} %",
+        f"    Clash VdW overlap factor   : {CLASH_OVERLAP_FACTOR}  "
+        f"(1-2/1-3{'/1-4' if EXCLUDE_14_PAIRS else ''} excluded)",
+        f"    Omega deviation tolerance  : {OMEGA_TRANS_TOL_DEG}°  "
+        f"(frame pass ≤ {MAX_OMEGA_BAD_RATIO*100:.1f} % bad)",
+        f"    Rama disallowed tolerance  : frame pass ≤ {MAX_RAMA_DISALLOWED_RATIO*100:.1f} %",
+        "",
+        "── BOND LENGTHS " + "─" * 55,
+        f"  Bonds within limits  : {tot_ok:,} / {tot_bonds:,}  ({pct(tot_ok, tot_bonds)})",
+        f"  Frames pass (≤{MAX_BOND_BAD_RATIO*100:.0f}% bad): "
         f"{df['frame_bond_ok'].sum()} / {n_total}  "
-        f"({100 * df['frame_bond_ok'].mean():.2f} %)",
+        f"({pct(df['frame_bond_ok'].sum(), n_total)})",
         "",
-        "── BACKBONE ANGLES ─────────────────────────────────────────────────",
-        f"  Frames ALL angles OK: "
+        "── BACKBONE ANGLES (N-CA-C) " + "─" * 43,
+        f"  Frames ALL angles OK : "
         f"{df['frame_angle_ok'].sum()} / {n_total}  "
-        f"({100 * df['frame_angle_ok'].mean():.2f} %)",
-        f"  Mean fraction bad angles per frame: "
-        f"{df['backbone_angle_frac_bad'].mean():.4f}",
+        f"({pct(df['frame_angle_ok'].sum(), n_total)})",
+        f"  Mean fraction bad    : {df['backbone_angle_frac_bad'].mean():.4f}",
         "",
-        "── STERIC CLASHES ──────────────────────────────────────────────────",
-        f"  Clash-free frames : "
+        "── STERIC CLASHES " + "─" * 52,
+        f"  Clash-free frames    : "
         f"{df['frame_clash_ok'].sum()} / {n_total}  "
-        f"({100 * df['frame_clash_ok'].mean():.2f} %)",
-        f"  Mean clashes/frame: {df['n_clashes'].mean():.2f}",
-        f"  Max clashes/frame : {df['n_clashes'].max()}",
+        f"({pct(df['frame_clash_ok'].sum(), n_total)})",
+        f"  Mean clashes / frame : {df['n_clashes'].mean():.2f}",
+        f"  Max  clashes / frame : {df['n_clashes'].max()}",
         "",
-        "── PEPTIDE PLANARITY (ω) ───────────────────────────────────────────",
-        f"  Frames all ω OK   : "
+        "── PEPTIDE PLANARITY (ω) " + "─" * 46,
+        f"  Frames pass          : "
         f"{df['frame_omega_ok'].sum()} / {n_total}  "
-        f"({100 * df['frame_omega_ok'].mean():.2f} %)",
-        f"  Mean fraction bad ω per frame: " f"{df['omega_frac_bad'].mean():.4f}",
+        f"({pct(df['frame_omega_ok'].sum(), n_total)})",
+        f"  Mean fraction bad ω  : {df['omega_frac_bad'].mean():.4f}",
         "",
-        "── RAMACHANDRAN ────────────────────────────────────────────────────",
-        f"  Frames ALL residues in allowed regions: "
+        "── RAMACHANDRAN (polygon-based, includes PPII) " + "─" * 23,
+        f"  Frames pass          : "
         f"{df['frame_rama_ok'].sum()} / {n_total}  "
-        f"({100 * df['frame_rama_ok'].mean():.2f} %)",
-        f"  Mean fraction disallowed per frame: "
-        f"{df['rama_frac_disallowed'].mean():.4f}",
+        f"({pct(df['frame_rama_ok'].sum(), n_total)})",
+        f"  Mean frac disallowed : {df['rama_frac_disallowed'].mean():.4f}",
         "",
-        "── OVERALL (all checks pass) ───────────────────────────────────────",
-        f"  Fully viable frames: "
+        "── OVERALL (all five checks pass) " + "─" * 36,
+        f"  Fully viable frames  : "
         f"{df['frame_fully_ok'].sum()} / {n_total}  "
-        f"({100 * df['frame_fully_ok'].mean():.2f} %)",
-        "=" * 70,
-        "",
-        "── WORST PROTEINS (by % fully viable frames) ───────────────────────",
+        f"({pct(df['frame_fully_ok'].sum(), n_total)})",
+        "=" * 72,
     ]
 
+    lines += ["", "── WORST 10 PROTEINS (% fully viable frames) " + "─" * 25]
     worst = summary.sort_values("frames_fully_ok_pct").head(10)
-    for prot, row_ in worst.iterrows():
-        report_lines.append(
-            f"  {prot:<20}  {row_['frames_fully_ok_pct']:5.1f}%  "
-            f"(clashes/frame: {row_['mean_clashes_per_frame']:.1f})"
+    for prot, r in worst.iterrows():
+        lines.append(
+            f"  {prot:<25}  {r['frames_fully_ok_pct']:5.1f}%  "
+            f"clashes/frame={r['mean_clashes_per_frame']:.1f}  "
+            f"rama_dis={r['mean_rama_frac_disallowed']:.3f}  "
+            f"omega_bad={r['mean_omega_frac_bad']:.3f}"
         )
 
-    report_lines += [
-        "",
-        "── BEST PROTEINS (by % fully viable frames) ────────────────────────",
-    ]
+    lines += ["", "── BEST 10 PROTEINS (% fully viable frames) " + "─" * 26]
     best = summary.sort_values("frames_fully_ok_pct", ascending=False).head(10)
-    for prot, row_ in best.iterrows():
-        report_lines.append(f"  {prot:<20}  {row_['frames_fully_ok_pct']:5.1f}%")
+    for prot, r in best.iterrows():
+        lines.append(
+            f"  {prot:<25}  {r['frames_fully_ok_pct']:5.1f}%  "
+            f"clashes/frame={r['mean_clashes_per_frame']:.1f}  "
+            f"rama_dis={r['mean_rama_frac_disallowed']:.3f}"
+        )
 
-    report_text = "\n".join(report_lines)
+    lines.append("")
+    return "\n".join(lines)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Main
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Geometric viability analysis for IDP conformational ensembles."
+    )
+    parser.add_argument(
+        "--input_dir",
+        type=str,
+        required=True,
+        help="Root directory containing one sub-folder per protein.",
+    )
+    parser.add_argument(
+        "--source",
+        type=str,
+        required=True,
+        choices=["IDPFold2", "AF-CALVADOS", "STARLING"],
+        help="Trajectory source / naming convention.",
+    )
+    parser.add_argument(
+        "--output_dir",
+        type=str,
+        default="data/conformations_analysis",
+        help="Directory to write CSV and report files.",
+    )
+    parser.add_argument(
+        "--limit_n_prot",
+        type=int,
+        default=2000,
+        help="Maximum number of protein directories to process.",
+    )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=max(1, mp.cpu_count() - 1),
+        help="Number of parallel worker processes.",
+    )
+    parser.add_argument(
+        "--chunk_size",
+        type=int,
+        default=DEFAULT_CHUNK_SIZE,
+        help="Number of per-frame rows to accumulate before writing to disk.",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="Random seed for protein sub-sampling.",
+    )
+    args = parser.parse_args()
+
+    DATA_ROOT = Path(args.input_dir)
+    OUTPUT_DIR = Path(args.output_dir)
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+    if not DATA_ROOT.exists():
+        sys.exit(f"Input directory not found: {DATA_ROOT}")
+
+    random.seed(args.seed)
+    all_dirs = [d for d in DATA_ROOT.iterdir() if d.is_dir()]
+    n_sample = min(args.limit_n_prot, len(all_dirs))
+    prot_dirs = random.sample(all_dirs, n_sample)
+    print(
+        f"Processing {n_sample} / {len(all_dirs)} protein directories "
+        f"from {DATA_ROOT}  (workers={args.workers})\n"
+    )
+
+    per_frame_path = OUTPUT_DIR / f"results_per_frame_{args.source}.csv"
+    write_header = True
+    all_rows_buf: list[dict] = []
+
+    worker_fn = partial(_worker)
+    tasks = [(d, args.source) for d in prot_dirs]
+
+    with mp.Pool(processes=args.workers) as pool:
+        for rows in tqdm(
+            pool.imap_unordered(_worker, tasks, chunksize=1),
+            total=len(tasks),
+            desc="proteins",
+        ):
+            all_rows_buf.extend(rows)
+
+            # Stream chunks to disk to keep memory bounded
+            if len(all_rows_buf) >= args.chunk_size:
+                chunk_df = pd.DataFrame(all_rows_buf)
+                chunk_df.to_csv(
+                    per_frame_path,
+                    mode="a",
+                    header=write_header,
+                    index=False,
+                )
+                write_header = False
+                all_rows_buf.clear()
+
+    # Flush remainder
+    if all_rows_buf:
+        pd.DataFrame(all_rows_buf).to_csv(
+            per_frame_path, mode="a", header=write_header, index=False
+        )
+
+    if not per_frame_path.exists() or per_frame_path.stat().st_size == 0:
+        sys.exit("No data collected. Check input paths and file naming.")
+
+    print(f"\nPer-frame results → {per_frame_path}")
+
+    # ── Build summary and report ─────────────────────────────────────────────
+    df = pd.read_csv(per_frame_path)
+    summary = build_summary(df)
+
+    summary_path = OUTPUT_DIR / f"results_summary_{args.source}.csv"
+    summary.to_csv(summary_path)
+    print(f"Per-protein summary → {summary_path}")
+
+    report_text = build_report(df, summary, args.source)
     print("\n" + report_text)
 
-    report_path = OUTPUT_DIR / "report.txt"
-    with open(report_path, "w") as f:
-        f.write(report_text + "\n")
-    print(f"\nReport saved → {report_path}")
+    report_path = OUTPUT_DIR / f"report_full_atom_{args.source}.txt"
+    report_path.write_text(report_text + "\n")
+    print(f"Report → {report_path}")
 
 
 if __name__ == "__main__":
