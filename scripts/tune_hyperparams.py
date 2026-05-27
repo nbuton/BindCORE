@@ -345,12 +345,12 @@ def main() -> None:
     parser.add_argument("--output-dir", default="./ray_results")
     parser.add_argument("--exp-name", default="core_MoRF_hpo_two_seeds_V3")
     parser.add_argument(
-        "--limit-VRAM", action="store_true", help="Limit GPU memory to 40%%"
+        "--limit-VRAM", action="store_true", help="Limit GPU memory to 49%%"
     )
     args = parser.parse_args()
 
     if args.limit_VRAM:
-        torch.cuda.set_per_process_memory_fraction(0.4)
+        torch.cuda.set_per_process_memory_fraction(0.49)
 
     # -- Load the single YAML -------------------------------------------------
     search_space_path = Path(args.search_space).resolve()
