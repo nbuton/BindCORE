@@ -391,7 +391,7 @@ class bindcore_Trainer:
             if eval_mode == "sustain":
                 return sustained_peak - earliness_penalty
             else:
-                return peak_epoch
+                return peak_value
         else:
             print("Empty validation so no value to optimize")
             return None
