@@ -122,7 +122,7 @@ def compute_residue_metrics(
 _TABLE_COLS = [
     ("model", "Model"),
     ("n_residues", "N res."),
-    ("pos_rate", "LIP%"),
+    ("pos_rate", "Positive rate (on no mask)"),
     ("mcc", "MCC"),
     ("f1", "F1"),
     ("precision", "Prec."),

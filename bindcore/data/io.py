@@ -191,6 +191,11 @@ def prepare_data(
     """Extract and organise features from an HDF5 file for all proteins in df."""
     list_ids, X_scalar_list, X_local_list = [], [], []
     X_pairwise_list, seq_enc_list, y_list = [], [], []
+    # Check for missing protein IDs before starting the loop
+    if missing_pids := set(df["protein_id"]) - set(h5_data.keys()):
+        print(
+            f"Warning: The following {len(missing_pids)} protein IDs are missing from h5_data: {missing_pids}"
+        )
 
     for _, row in df.iterrows():
         pid = row["protein_id"]

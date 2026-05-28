@@ -39,10 +39,16 @@ def main() -> None:
     model, checkpoint = load_checkpoint(args.model, device)
     print(f"Loaded checkpoint: {args.model}")
 
+    model_stem = Path(args.model).stem
+    h5_stem = Path(args.h5).stem
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
     with h5py.File(args.h5, "r") as h5_features:
         for dataset_path in args.datasets:
-            stem = Path(dataset_path).stem
-            output_filepath = str(Path(args.output_dir) / f"bindcore_{stem}.csv")
+            dataset_stem = Path(dataset_path).stem
+            filename = f"{model_stem}_{h5_stem}_{dataset_stem}.csv"
+            output_filepath = str(output_dir / filename)
             print(f"\nRunning inference on: {dataset_path}")
             predict_dataset(
                 dataset_path=dataset_path,
