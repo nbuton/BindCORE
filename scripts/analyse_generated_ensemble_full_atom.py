@@ -34,6 +34,7 @@ python analyse_generated_ensemble_full_atom.py \
     --input_dir  data/conformational_ensemble/AF-CALVADOS \
     --source     AF-CALVADOS \
     --limit_n_prot 2000 \
+    --frames_per_protein 100 \
     --workers    8 \
     --chunk_size 500
 """
@@ -41,12 +42,12 @@ python analyse_generated_ensemble_full_atom.py \
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import random
 import sys
 import warnings
 import multiprocessing as mp
-from functools import partial
 from pathlib import Path
 
 import numpy as np
@@ -55,8 +56,7 @@ from tqdm import tqdm
 
 
 import MDAnalysis as mda
-from MDAnalysis.analysis import dihedrals as mda_dihedrals
-from MDAnalysis.lib.distances import self_distance_array
+from MDAnalysis.lib.distances import calc_dihedrals, self_distance_array
 
 warnings.filterwarnings("ignore")
 
@@ -71,7 +71,7 @@ warnings.filterwarnings("ignore")
 BOND_LIMITS: dict[str, tuple[float, float]] = {
     "C-C": (1.38, 1.68),
     "C-N": (1.22, 1.58),
-    "C-O": (1.12, 1.38),
+    "C-O": (1.12, 1.55),
     "C-S": (1.68, 1.98),
     "N-N": (1.18, 1.52),
     "N-O": (1.18, 1.50),
@@ -79,8 +79,8 @@ BOND_LIMITS: dict[str, tuple[float, float]] = {
     "S-S": (1.90, 2.15),
     # Bonds involving hydrogen
     "C-H": (0.85, 1.15),
-    "H-N": (0.85, 1.15),
-    "H-O": (0.85, 1.05),
+    "H-N": (0.80, 1.15),
+    "H-O": (0.80, 1.10),
     "H-S": (1.20, 1.45),
 }
 BOND_ABSOLUTE_MIN = 0.70  # Å – below this is always wrong
@@ -159,6 +159,9 @@ MAX_OMEGA_BAD_RATIO = 0.05
 # ── Output chunk size (rows written at once) ──────────────────────────────────
 DEFAULT_CHUNK_SIZE = 500
 
+# ── Frames to sample per protein trajectory ──────────────────────────────────
+DEFAULT_FRAMES_PER_PROTEIN = 100
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Geometry helpers
@@ -176,6 +179,35 @@ def _elem(atom_name: str) -> str:
 def _bond_key(n1: str, n2: str) -> str:
     e1, e2 = _elem(n1), _elem(n2)
     return "-".join(sorted([e1, e2]))
+
+
+def _pair_key(a: int, b: int) -> tuple[int, int]:
+    return (a, b) if a < b else (b, a)
+
+
+def _is_plausible_covalent_bond(atom_a, atom_b) -> bool:
+    """Filter distance-guessed bonds that are likely non-covalent contacts."""
+    same_residue = (
+        atom_a.segid == atom_b.segid
+        and atom_a.resid == atom_b.resid
+        and atom_a.resname == atom_b.resname
+    )
+    if same_residue:
+        return True
+
+    if atom_a.segid != atom_b.segid:
+        return False
+
+    names = {atom_a.name.strip(), atom_b.name.strip()}
+    resids = sorted((atom_a.resid, atom_b.resid))
+
+    if names == {"C", "N"} and resids[1] - resids[0] == 1:
+        return True
+
+    if names == {"SG"} and atom_a.resname == "CYS" and atom_b.resname == "CYS":
+        return True
+
+    return False
 
 
 def _point_in_polygon(px: float, py: float, polygon: list[tuple[float, float]]) -> bool:
@@ -216,14 +248,14 @@ class BondCache:
     ----------
     idx        : (N, 2) int array of atom indices
     lo, hi     : (N,) float arrays of allowed [min, max] bond lengths
-    excl_pairs : set of frozenset({i, j}) – pairs to skip in clash detection
+    excl_pairs : set of sorted (i, j) tuples – pairs to skip in clash detection
     """
 
     def __init__(self, u: mda.Universe):
         self.idx = None
         self.lo = None
         self.hi = None
-        self.excl_pairs: set[frozenset] = set()
+        self.excl_pairs: set[tuple[int, int]] = set()
         self._build(u)
 
     def _build(self, u: mda.Universe):
@@ -246,11 +278,22 @@ class BondCache:
         if len(bonds) == 0:
             return
 
-        raw_idx = bonds.indices.copy()  # (N, 2)
-        names = np.array([[b.atoms[0].name, b.atoms[1].name] for b in bonds])
+        raw_idx_all = bonds.indices.copy()  # (N, 2)
+        keep_bonds = [
+            _is_plausible_covalent_bond(b.atoms[0], b.atoms[1]) for b in bonds
+        ]
+        raw_idx = raw_idx_all[np.asarray(keep_bonds, dtype=bool)]
 
-        lo = np.empty(len(bonds))
-        hi = np.empty(len(bonds))
+        if len(raw_idx) == 0:
+            return
+
+        names = np.array([[u.atoms[i].name, u.atoms[j].name] for i, j in raw_idx])
+
+        # IMPORTANT: allocate using the filtered bond count, not the original
+        # topology bond count. Otherwise self.idx, self.lo, and self.hi can end
+        # up with different lengths and broadcast errors will occur later.
+        lo = np.empty(len(raw_idx), dtype=np.float64)
+        hi = np.empty(len(raw_idx), dtype=np.float64)
         for i, (n1, n2) in enumerate(names):
             key = _bond_key(n1, n2)
             _lo, _hi = BOND_LIMITS.get(key, (BOND_ABSOLUTE_MIN, BOND_ABSOLUTE_MAX))
@@ -264,7 +307,7 @@ class BondCache:
         # ── Build exclusion set for clash detection ─────────────────────────
         # 1-2 pairs (direct bonds)
         for a, b in raw_idx:
-            self.excl_pairs.add(frozenset({int(a), int(b)}))
+            self.excl_pairs.add(_pair_key(int(a), int(b)))
 
         # 1-3 pairs (shared neighbour)
         adj: dict[int, set[int]] = {}
@@ -276,7 +319,7 @@ class BondCache:
             nb_list = list(neighbours)
             for i in range(len(nb_list)):
                 for j in range(i + 1, len(nb_list)):
-                    self.excl_pairs.add(frozenset({nb_list[i], nb_list[j]}))
+                    self.excl_pairs.add(_pair_key(nb_list[i], nb_list[j]))
 
         # 1-4 pairs (optional)
         if EXCLUDE_14_PAIRS:
@@ -284,11 +327,181 @@ class BondCache:
                 for nb in neighbours:
                     for nb2 in adj.get(nb, set()):
                         if nb2 != center:
-                            self.excl_pairs.add(frozenset({center, nb2}))
+                            self.excl_pairs.add(_pair_key(center, nb2))
 
     @property
     def valid(self) -> bool:
         return self.idx is not None
+
+
+def _res_atom_index(residue, atom_name: str) -> int | None:
+    atoms = residue.atoms.select_atoms(f"name {atom_name}")
+    if len(atoms) == 0:
+        return None
+    return int(atoms[0].index)
+
+
+def _select_heavy_protein_atoms(u: mda.Universe):
+    protein_atoms = u.select_atoms("protein")
+    heavy_indices = [atom.index for atom in protein_atoms if _elem(atom.name) != "H"]
+    return u.atoms[heavy_indices]
+
+
+class BackboneAngleCache:
+    """Atom indices needed for per-frame N-CA-C angle checks."""
+
+    def __init__(self, residues):
+        n_idx = []
+        ca_idx = []
+        c_idx = []
+        for res in residues:
+            n = _res_atom_index(res, "N")
+            ca = _res_atom_index(res, "CA")
+            c = _res_atom_index(res, "C")
+            if n is None or ca is None or c is None:
+                continue
+            n_idx.append(n)
+            ca_idx.append(ca)
+            c_idx.append(c)
+
+        self.n_idx = np.asarray(n_idx, dtype=np.intp)
+        self.ca_idx = np.asarray(ca_idx, dtype=np.intp)
+        self.c_idx = np.asarray(c_idx, dtype=np.intp)
+
+    @property
+    def valid(self) -> bool:
+        return len(self.n_idx) > 0
+
+
+class ClashCache:
+    """Pre-computed pair thresholds for vectorized clash checks."""
+
+    def __init__(self, heavy_atoms, bond_cache: BondCache):
+        self.thresholds = None
+        self.distance_buffer = None
+        self._build(heavy_atoms, bond_cache)
+
+    def _build(self, heavy_atoms, bond_cache: BondCache):
+        n_atoms = len(heavy_atoms)
+        if n_atoms < 2:
+            return
+
+        n_pairs = n_atoms * (n_atoms - 1) // 2
+        thresholds = np.empty(n_pairs, dtype=np.float32)
+        radii = np.asarray(
+            [
+                VDW_RADII.get(_elem(atom.name), VDW_DEFAULT_RADIUS)
+                for atom in heavy_atoms
+            ],
+            dtype=np.float32,
+        )
+        atom_indices = heavy_atoms.indices
+
+        k = 0
+        for i in range(n_atoms - 1):
+            atom_i = int(atom_indices[i])
+            radius_i = radii[i]
+            for j in range(i + 1, n_atoms):
+                atom_j = int(atom_indices[j])
+                if _pair_key(atom_i, atom_j) in bond_cache.excl_pairs:
+                    thresholds[k] = -np.inf
+                else:
+                    thresholds[k] = (radius_i + radii[j]) * CLASH_OVERLAP_FACTOR
+                k += 1
+
+        self.thresholds = thresholds
+        self.distance_buffer = np.empty(n_pairs, dtype=np.float64)
+
+    @property
+    def valid(self) -> bool:
+        return self.thresholds is not None and len(self.thresholds) > 0
+
+
+class OmegaCache:
+    """Atom indices needed for vectorized omega checks."""
+
+    def __init__(self, residues):
+        ca_i_idx = []
+        c_i_idx = []
+        n_next_idx = []
+        ca_next_idx = []
+        next_is_pro = []
+        res_list = list(residues)
+
+        for i in range(len(res_list) - 1):
+            ri = res_list[i]
+            ri1 = res_list[i + 1]
+            if ri.segid != ri1.segid or ri1.resid - ri.resid != 1:
+                continue
+
+            ca_i = _res_atom_index(ri, "CA")
+            c_i = _res_atom_index(ri, "C")
+            n_i1 = _res_atom_index(ri1, "N")
+            ca_i1 = _res_atom_index(ri1, "CA")
+            if ca_i is None or c_i is None or n_i1 is None or ca_i1 is None:
+                continue
+
+            ca_i_idx.append(ca_i)
+            c_i_idx.append(c_i)
+            n_next_idx.append(n_i1)
+            ca_next_idx.append(ca_i1)
+            next_is_pro.append(ri1.resname == "PRO")
+
+        self.ca_i_idx = np.asarray(ca_i_idx, dtype=np.intp)
+        self.c_i_idx = np.asarray(c_i_idx, dtype=np.intp)
+        self.n_next_idx = np.asarray(n_next_idx, dtype=np.intp)
+        self.ca_next_idx = np.asarray(ca_next_idx, dtype=np.intp)
+        self.next_is_pro = np.asarray(next_is_pro, dtype=bool)
+
+    @property
+    def valid(self) -> bool:
+        return len(self.ca_i_idx) > 0
+
+
+class RamachandranCache:
+    """Atom indices needed for vectorized per-frame phi/psi checks."""
+
+    def __init__(self, residues):
+        c_prev_idx = []
+        n_idx = []
+        ca_idx = []
+        c_idx = []
+        n_next_idx = []
+        res_list = list(residues)
+
+        for i in range(1, len(res_list) - 1):
+            prev_res = res_list[i - 1]
+            res = res_list[i]
+            next_res = res_list[i + 1]
+
+            if prev_res.segid != res.segid or res.segid != next_res.segid:
+                continue
+            if res.resid - prev_res.resid != 1 or next_res.resid - res.resid != 1:
+                continue
+
+            c_prev = _res_atom_index(prev_res, "C")
+            n = _res_atom_index(res, "N")
+            ca = _res_atom_index(res, "CA")
+            c = _res_atom_index(res, "C")
+            n_next = _res_atom_index(next_res, "N")
+            if None in (c_prev, n, ca, c, n_next):
+                continue
+
+            c_prev_idx.append(c_prev)
+            n_idx.append(n)
+            ca_idx.append(ca)
+            c_idx.append(c)
+            n_next_idx.append(n_next)
+
+        self.c_prev_idx = np.asarray(c_prev_idx, dtype=np.intp)
+        self.n_idx = np.asarray(n_idx, dtype=np.intp)
+        self.ca_idx = np.asarray(ca_idx, dtype=np.intp)
+        self.c_idx = np.asarray(c_idx, dtype=np.intp)
+        self.n_next_idx = np.asarray(n_next_idx, dtype=np.intp)
+
+    @property
+    def valid(self) -> bool:
+        return len(self.n_idx) > 0
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -319,160 +532,112 @@ def check_bond_lengths(
     return n_bonds, n_ok, n_bad, bad_ratio, frame_ok
 
 
-def check_backbone_angles(residues) -> tuple[float, bool]:
+def check_backbone_angles(
+    positions: np.ndarray, cache: BackboneAngleCache
+) -> tuple[float, bool]:
     """
     N-CA-C angle for every residue.
     Returns (frac_bad, frame_ok).
     """
-    bad = 0
-    total = 0
-    for res in residues:
-        try:
-            n = res.atoms.select_atoms("name N")[0].position
-            ca = res.atoms.select_atoms("name CA")[0].position
-            c = res.atoms.select_atoms("name C")[0].position
-            v1 = n - ca
-            v2 = c - ca
-            cos_a = np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2) + 1e-9)
-            angle = np.degrees(np.arccos(np.clip(cos_a, -1.0, 1.0)))
-            total += 1
-            if not (ANGLE_NCA_C_MIN <= angle <= ANGLE_NCA_C_MAX):
-                bad += 1
-        except (IndexError, Exception):
-            pass
-    if total == 0:
+    if not cache.valid:
         return float("nan"), True
-    frac_bad = bad / total
+
+    n = positions[cache.n_idx]
+    ca = positions[cache.ca_idx]
+    c = positions[cache.c_idx]
+    v1 = n - ca
+    v2 = c - ca
+    denom = np.linalg.norm(v1, axis=1) * np.linalg.norm(v2, axis=1) + 1e-9
+    cos_a = np.einsum("ij,ij->i", v1, v2) / denom
+    angles = np.degrees(np.arccos(np.clip(cos_a, -1.0, 1.0)))
+    bad = (angles < ANGLE_NCA_C_MIN) | (angles > ANGLE_NCA_C_MAX)
+    frac_bad = float(bad.mean())
     return frac_bad, frac_bad == 0.0
 
 
-def check_clashes(heavy_atoms, cache: BondCache) -> tuple[int, bool]:
+def check_clashes(heavy_atoms, cache: ClashCache) -> tuple[int, bool]:
     """
     Count steric clashes among heavy atoms using VdW-radius overlap,
     properly excluding 1-2, 1-3 (and optionally 1-4) bonded pairs.
 
     Returns (n_clashes, clash_free).
     """
-    positions = heavy_atoms.positions
-    n = len(positions)
-    if n < 2:
+    if not cache.valid:
         return 0, True
 
-    # Build per-atom VdW radii array
-    radii = np.array(
-        [VDW_RADII.get(_elem(a.name), VDW_DEFAULT_RADIUS) for a in heavy_atoms]
-    )
-
-    # Map heavy-atom local index → Universe atom index
-    heavy_indices = heavy_atoms.indices  # shape (n,)
-
-    # Upper-triangle pairwise distances
-    dists = self_distance_array(positions)  # length n*(n-1)/2
-
-    n_clashes = 0
-    k = 0
-    for i in range(n - 1):
-        for j in range(i + 1, n):
-            pair = frozenset({int(heavy_indices[i]), int(heavy_indices[j])})
-            if pair not in cache.excl_pairs:
-                min_dist = (radii[i] + radii[j]) * CLASH_OVERLAP_FACTOR
-                if dists[k] < min_dist:
-                    n_clashes += 1
-            k += 1
+    dists = self_distance_array(heavy_atoms.positions, result=cache.distance_buffer)
+    n_clashes = int(np.count_nonzero(dists < cache.thresholds))
 
     return n_clashes, n_clashes == 0
 
 
-def check_omega(residues) -> tuple[float, int, bool]:
+def check_omega(positions: np.ndarray, cache: OmegaCache) -> tuple[float, int, bool]:
     """
     Compute ω = CA(i)-C(i)-N(i+1)-CA(i+1) for consecutive residue pairs
-    using residue objects directly (avoids list-index mismatches at chain
-    breaks).
+    using pre-computed atom indices.
 
     Returns (frac_bad, n_checked, frame_ok).
     frame_ok is True when frac_bad <= MAX_OMEGA_BAD_RATIO.
     """
-    res_list = list(residues)
-    n_bad = 0
-    n_checked = 0
-
-    for i in range(len(res_list) - 1):
-        ri = res_list[i]
-        ri1 = res_list[i + 1]
-
-        # Only consider consecutive residues in the same chain
-        if ri.segid != ri1.segid:
-            continue
-        if ri1.resid - ri.resid != 1:
-            continue
-
-        try:
-            ca_i = ri.atoms.select_atoms("name CA")[0].position
-            c_i = ri.atoms.select_atoms("name C")[0].position
-            n_i1 = ri1.atoms.select_atoms("name N")[0].position
-            ca_i1 = ri1.atoms.select_atoms("name CA")[0].position
-        except IndexError:
-            continue
-
-        b1 = c_i - ca_i
-        b2 = n_i1 - c_i
-        b3 = ca_i1 - n_i1
-
-        n1 = np.cross(b1, b2)
-        n2 = np.cross(b2, b3)
-        b2_norm = b2 / (np.linalg.norm(b2) + 1e-9)
-        m1 = np.cross(n1, b2_norm)
-
-        x = np.dot(n1, n2)
-        y = np.dot(m1, n2)
-        omega = np.degrees(np.arctan2(y, x))
-
-        n_checked += 1
-        dev_from_trans = abs(abs(omega) - 180.0)
-
-        # Allow cis-proline
-        is_next_pro = ri1.resname == "PRO"
-        if is_next_pro and abs(omega) < OMEGA_CIS_PRO_TOL_DEG:
-            continue  # valid cis-Pro
-
-        if dev_from_trans > OMEGA_TRANS_TOL_DEG:
-            n_bad += 1
-
-    if n_checked == 0:
+    if not cache.valid:
         return float("nan"), 0, True
 
+    omega = np.degrees(
+        calc_dihedrals(
+            positions[cache.ca_i_idx],
+            positions[cache.c_i_idx],
+            positions[cache.n_next_idx],
+            positions[cache.ca_next_idx],
+        )
+    )
+    dev_from_trans = np.abs(np.abs(omega) - 180.0)
+    valid_cis_pro = cache.next_is_pro & (np.abs(omega) < OMEGA_CIS_PRO_TOL_DEG)
+    bad = (~valid_cis_pro) & (dev_from_trans > OMEGA_TRANS_TOL_DEG)
+    n_bad = int(np.count_nonzero(bad))
+    n_checked = len(omega)
     frac_bad = n_bad / n_checked
     frame_ok = frac_bad <= MAX_OMEGA_BAD_RATIO
     return frac_bad, n_checked, frame_ok
 
 
-def check_ramachandran(protein_ag) -> tuple[float, bool]:
+def check_ramachandran(
+    positions: np.ndarray, cache: RamachandranCache
+) -> tuple[float, bool]:
     """
-    Compute phi/psi using MDAnalysis Ramachandran, then classify each
-    residue using the polygon-based allowed regions (alpha, beta/PPII,
-    left-handed helix).
+    Compute phi/psi from cached atom indices, then classify each residue
+    using the polygon-based allowed regions (alpha, beta/PPII, left-handed
+    helix).
 
     Returns (frac_disallowed, frame_ok).
     frame_ok is True when frac_disallowed <= MAX_RAMA_DISALLOWED_RATIO.
     """
-    try:
-        rama_run = mda_dihedrals.Ramachandran(protein_ag).run()
-        angles = rama_run.results.angles  # (1, n_res, 2)
-        if angles.shape[1] == 0:
-            return float("nan"), True
-
-        phis = angles[0, :, 0]
-        psis = angles[0, :, 1]
-
-        n_res = len(phis)
-        n_disallowed = sum(
-            0 if _in_allowed_rama(phi, psi) else 1 for phi, psi in zip(phis, psis)
-        )
-        frac_disallowed = n_disallowed / n_res
-        frame_ok = frac_disallowed <= MAX_RAMA_DISALLOWED_RATIO
-        return frac_disallowed, frame_ok
-    except Exception:
+    if not cache.valid:
         return float("nan"), True
+
+    phis = np.degrees(
+        calc_dihedrals(
+            positions[cache.c_prev_idx],
+            positions[cache.n_idx],
+            positions[cache.ca_idx],
+            positions[cache.c_idx],
+        )
+    )
+    psis = np.degrees(
+        calc_dihedrals(
+            positions[cache.n_idx],
+            positions[cache.ca_idx],
+            positions[cache.c_idx],
+            positions[cache.n_next_idx],
+        )
+    )
+
+    n_res = len(phis)
+    n_disallowed = sum(
+        0 if _in_allowed_rama(phi, psi) else 1 for phi, psi in zip(phis, psis)
+    )
+    frac_disallowed = n_disallowed / n_res
+    frame_ok = frac_disallowed <= MAX_RAMA_DISALLOWED_RATIO
+    return frac_disallowed, frame_ok
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -495,15 +660,33 @@ def _get_files(protein_dir: Path, source: str) -> tuple[Path | None, Path | None
 
     elif source == "STARLING":
         # Adapt naming convention when known
-        raise NotImplementedError("STARLING file layout not yet configured.")
+        return (protein_dir / f"top_AA.pdb", protein_dir / f"traj_AA.xtc")
 
     else:
         raise ValueError(f"Unknown source: {source!r}")
 
 
-def analyse_protein(protein_dir: Path, source: str) -> list[dict]:
+def _stable_seed(base_seed: int, protein_name: str) -> int:
+    seed_material = f"{base_seed}:{protein_name}".encode("utf-8")
+    digest = hashlib.blake2b(seed_material, digest_size=8).digest()
+    return int.from_bytes(digest, byteorder="big", signed=False)
+
+
+def _sample_frame_indices(
+    n_frames: int, frames_per_protein: int, seed: int, protein_name: str
+) -> list[int]:
+    if frames_per_protein == -1 or n_frames <= frames_per_protein:
+        return list(range(n_frames))
+
+    rng = random.Random(_stable_seed(seed, protein_name))
+    return sorted(rng.sample(range(n_frames), frames_per_protein))
+
+
+def analyse_protein(
+    protein_dir: Path, source: str, frames_per_protein: int, seed: int
+) -> list[dict]:
     """
-    Analyse every frame of one protein trajectory.
+    Analyse a random subset of frames from one protein trajectory.
     Returns a list of row-dicts (one per frame).
     """
     top_path, dcd_path = _get_files(protein_dir, source)
@@ -519,10 +702,18 @@ def analyse_protein(protein_dir: Path, source: str) -> list[dict]:
 
     cache = BondCache(u)
     protein_ag = u.select_atoms("protein")
-    heavy_ag = u.select_atoms("protein and not name H*")
+    heavy_ag = _select_heavy_protein_atoms(u)
+    angle_cache = BackboneAngleCache(protein_ag.residues)
+    clash_cache = ClashCache(heavy_ag, cache)
+    omega_cache = OmegaCache(protein_ag.residues)
+    rama_cache = RamachandranCache(protein_ag.residues)
 
     rows = []
-    for ts in u.trajectory:
+    frame_indices = _sample_frame_indices(
+        len(u.trajectory), frames_per_protein, seed, protein_dir.name
+    )
+    for frame_idx in frame_indices:
+        ts = u.trajectory[frame_idx]
         fi = ts.frame
         row: dict = {"protein": protein_dir.name, "frame": fi}
 
@@ -537,23 +728,23 @@ def analyse_protein(protein_dir: Path, source: str) -> list[dict]:
         row["frame_bond_ok"] = bl_ok
 
         # 2. Backbone angles ───────────────────────────────────────────────────
-        frac_bad_angle, angle_ok = check_backbone_angles(protein_ag.residues)
+        frac_bad_angle, angle_ok = check_backbone_angles(positions, angle_cache)
         row["backbone_angle_frac_bad"] = _safe_round(frac_bad_angle)
         row["frame_angle_ok"] = angle_ok
 
         # 3. Clashes ───────────────────────────────────────────────────────────
-        n_clashes, clash_ok = check_clashes(heavy_ag, cache)
+        n_clashes, clash_ok = check_clashes(heavy_ag, clash_cache)
         row["n_clashes"] = n_clashes
         row["frame_clash_ok"] = clash_ok
 
         # 4. Omega ─────────────────────────────────────────────────────────────
-        frac_bad_omega, n_omega, omega_ok = check_omega(protein_ag.residues)
+        frac_bad_omega, n_omega, omega_ok = check_omega(positions, omega_cache)
         row["omega_frac_bad"] = _safe_round(frac_bad_omega)
         row["n_omega_checked"] = n_omega
         row["frame_omega_ok"] = omega_ok
 
         # 5. Ramachandran ──────────────────────────────────────────────────────
-        frac_disallowed, rama_ok = check_ramachandran(protein_ag)
+        frac_disallowed, rama_ok = check_ramachandran(positions, rama_cache)
         row["rama_frac_disallowed"] = _safe_round(frac_disallowed)
         row["frame_rama_ok"] = rama_ok
 
@@ -576,10 +767,10 @@ def _safe_round(v, decimals: int = 5):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
-def _worker(args: tuple[Path, str]) -> list[dict]:
-    protein_dir, source = args
+def _worker(args: tuple[Path, str, int, int]) -> list[dict]:
+    protein_dir, source, frames_per_protein, seed = args
     try:
-        return analyse_protein(protein_dir, source)
+        return analyse_protein(protein_dir, source, frames_per_protein, seed)
     except Exception as exc:
         print(f"  [WORKER ERROR] {protein_dir.name}: {exc}", flush=True)
         return []
@@ -710,6 +901,101 @@ def build_report(df: pd.DataFrame, summary: pd.DataFrame, source: str) -> str:
     return "\n".join(lines)
 
 
+def sanitize_and_filter_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+
+    # 1. REMOVE DUPLICATE HEADERS
+    # If the script appended headers mid-file, the 'protein' column will contain the string 'protein'
+    header_rows = df[df["protein"] == "protein"]
+    if not header_rows.empty:
+        print(f"🗑️  Removing {len(header_rows)} duplicate header rows found in CSV.")
+        df = df[df["protein"] != "protein"].copy()
+
+    # 2. DEFINE COLUMNS
+    numeric_cols = [
+        "bond_mean",
+        "bond_std",
+        "bond_bad_ratio",
+        "bonds_ok",
+        "bonds_bad",
+        "angle_mean",
+        "angle_bad_ratio",
+        "backbone_angle_frac_bad",
+        "dihedral_mean",
+        "dihedral_std",
+        "frac_extended",
+        "n_bonds",
+        "n_angles",
+        "n_dihedrals",
+        "n_clashes",
+        "omega_frac_bad",
+        "n_omega_checked",
+        "rama_frac_disallowed",
+        "ree",
+        "rg",
+        "rg_norm",
+        "mean_pairwise",
+    ]
+
+    # These columns often contain 'True'/'False' strings which to_numeric fails on
+    bool_cols = [
+        "frame_bond_ok",
+        "frame_angle_ok",
+        "frame_clash_ok",
+        "frame_omega_ok",
+        "frame_rama_ok",
+        "frame_shape_ok",
+        "frame_fully_ok",
+    ]
+
+    # 3. IDENTIFY FUSED-STRING CORRUPTION (The smushed numbers)
+    # Use the first available bond metric as the proxy. Anything still
+    # unparseable after header removal is corruption.
+    corruption_proxy = next(
+        (
+            col
+            for col in ("n_bonds", "bond_bad_ratio", "bond_mean")
+            if col in df.columns
+        ),
+        None,
+    )
+    if corruption_proxy is not None:
+        is_corrupted = pd.to_numeric(df[corruption_proxy], errors="coerce").isna()
+
+        if is_corrupted.any():
+            corrupted_count = is_corrupted.sum()
+            print(
+                f"⚠️  Removing {corrupted_count} frames with fused-string corruption."
+            )
+            df = df[~is_corrupted].copy()
+
+    # 4. CAST BOOLEANS FIRST
+    # Converts string "True"/"False" to actual 1/0 or True/False objects
+    for col in bool_cols:
+        if col in df.columns:
+            # Map strings to actual booleans if they are objects/strings
+            if df[col].dtype == "object":
+                df[col] = df[col].map(
+                    {
+                        "True": True,
+                        "False": False,
+                        "1": True,
+                        "0": False,
+                        1: True,
+                        0: False,
+                    }
+                )
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0).astype(int)
+
+    # 5. CAST REMAINING NUMERICS
+    for col in numeric_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="raise")
+
+    print("✅ Data cleaning complete. All columns cast to correct types.")
+    return df
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # Main
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -757,10 +1043,24 @@ def main():
         help="Number of per-frame rows to accumulate before writing to disk.",
     )
     parser.add_argument(
+        "--append",
+        action="store_true",
+        help="Append to an existing per-frame CSV instead of starting a fresh run.",
+    )
+    parser.add_argument(
+        "--frames_per_protein",
+        type=int,
+        default=DEFAULT_FRAMES_PER_PROTEIN,
+        help=(
+            "Number of random trajectory frames to analyse per protein. "
+            "Use -1 for all frames."
+        ),
+    )
+    parser.add_argument(
         "--seed",
         type=int,
         default=42,
-        help="Random seed for protein sub-sampling.",
+        help="Random seed for protein and frame sub-sampling.",
     )
     args = parser.parse_args()
 
@@ -771,21 +1071,32 @@ def main():
     if not DATA_ROOT.exists():
         sys.exit(f"Input directory not found: {DATA_ROOT}")
 
+    if args.frames_per_protein == 0 or args.frames_per_protein < -1:
+        sys.exit(
+            "--frames_per_protein must be a positive integer, or -1 for all frames."
+        )
+
     random.seed(args.seed)
     all_dirs = [d for d in DATA_ROOT.iterdir() if d.is_dir()]
     n_sample = min(args.limit_n_prot, len(all_dirs))
     prot_dirs = random.sample(all_dirs, n_sample)
+    frame_msg = (
+        "all frames"
+        if args.frames_per_protein == -1
+        else f"{args.frames_per_protein} random frame(s) per protein"
+    )
     print(
         f"Processing {n_sample} / {len(all_dirs)} protein directories "
-        f"from {DATA_ROOT}  (workers={args.workers})\n"
+        f"from {DATA_ROOT}  (workers={args.workers}, frames={frame_msg})\n"
     )
 
     per_frame_path = OUTPUT_DIR / f"results_per_frame_{args.source}.csv"
-    write_header = True
+    if per_frame_path.exists() and not args.append:
+        per_frame_path.unlink()
+    write_header = not per_frame_path.exists() or per_frame_path.stat().st_size == 0
     all_rows_buf: list[dict] = []
 
-    worker_fn = partial(_worker)
-    tasks = [(d, args.source) for d in prot_dirs]
+    tasks = [(d, args.source, args.frames_per_protein, args.seed) for d in prot_dirs]
 
     with mp.Pool(processes=args.workers) as pool:
         for rows in tqdm(
@@ -820,6 +1131,7 @@ def main():
 
     # ── Build summary and report ─────────────────────────────────────────────
     df = pd.read_csv(per_frame_path)
+    df = sanitize_and_filter_dataframe(df)
     summary = build_summary(df)
 
     summary_path = OUTPUT_DIR / f"results_summary_{args.source}.csv"
