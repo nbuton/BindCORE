@@ -31,14 +31,24 @@ from bindcore.utils import read_protein_data
 # ---------------------------------------------------------------------------
 
 LOCAL_FEATURES = [
-    "phi_entropy",
-    "psi_entropy",
-    "sasa_abs_mean",
-    "sasa_abs_std",
-    "sasa_rel_mean",
-    "sasa_rel_std",
-    "ss_propensity_B",
-    "ss_propensity_C",
+ "phi_entropy",
+"psi_entropy",
+        "phi_mean",
+     "psi_mean",
+         "phi_std",
+         "psi_std",
+         "sasa_abs_mean",
+         "sasa_abs_std",
+         "sasa_rel_mean",
+         "sasa_rel_std",
+         "ss_propensity_B",
+     "ss_propensity_C",
+         "ss_propensity_E",
+         "ss_propensity_G",
+        "ss_propensity_H",
+         "ss_propensity_I",
+         "ss_propensity_S",
+        "ss_propensity_T",
 ]
 PAIRWISE_FEATURES = ["dccm", "contact_map", "distance_fluctuations"]
 ALL_FEATURES = LOCAL_FEATURES + PAIRWISE_FEATURES
