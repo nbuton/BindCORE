@@ -30,7 +30,7 @@ def parse_args():
     parser.add_argument(
         "--xtc_name", type=str, default="_allatom.xtc",
         help="Full filename or suffix (if --dynamic is used).",
-    ) 
+    )
     parser.add_argument(
         "--dynamic", action="store_true",
         help="Prepend folder name (Protein ID) to pdb/xtc arguments.",
@@ -64,43 +64,9 @@ def submit_kwargs(d: Path, pdb: str, xtc: str, args) -> dict:
     )
 
 
-def process_result(pid, props, results_dict):
-    if "error" in props:
-        logging.error(f"Protein {pid}: {props['error']}")
-    else:
-        results_dict[pid] = props
+def get_output_path(input_dir: Path) -> Path:
+    return Path("data/properties/") / f"{input_dir.stem}_derived_properties.h5"
 
-
-def run_sequential(directories, args):
-    results_dict = {}
-    for d in tqdm(directories):
-        pdb, xtc = resolve_filenames(d, args.pdb_name, args.xtc_name, args.dynamic)
-        try:
-            pid, props = process_single_protein(d, **submit_kwargs(d, pdb, xtc, args))
-            process_result(pid, props, results_dict)
-        except Exception as e:
-            logging.error(f"Critical process failure for {d.name}: {e}")
-    return results_dict
-
-
-def run_parallel(directories, args):
-    results_dict = {}
-    with concurrent.futures.ProcessPoolExecutor(max_workers=args.workers) as executor:
-        futures = {
-            executor.submit(
-                process_single_protein, d,
-                **submit_kwargs(d, *resolve_filenames(d, args.pdb_name, args.xtc_name, args.dynamic), args)
-            ): d
-            for d in directories
-        }
-        for future in tqdm(concurrent.futures.as_completed(futures), total=len(futures)):
-            protein_dir = futures[future]
-            try:
-                pid, props = future.result()
-                process_result(pid, props, results_dict)
-            except Exception as e:
-                logging.error(f"Critical process failure for {protein_dir.name}: {e}")
-    return results_dict
 
 def get_already_processed(output_h5: Path) -> set[str]:
     """Return the set of protein IDs already present in the HDF5 file."""
@@ -109,25 +75,71 @@ def get_already_processed(output_h5: Path) -> set[str]:
     with h5py.File(output_h5, "r") as h5f:
         return set(h5f.keys())
 
-def save_results(results_dict, input_dir):
-    output_h5 = get_output_path(input_dir) 
-    output_h5.parent.mkdir(parents=True, exist_ok=True)
-    save_properties_to_h5(results_dict, output_h5)
-    print(f"Successfully processed {len(results_dict)} proteins. Saved to {output_h5}")
 
-def get_output_path(input_dir: Path) -> Path:
-    return Path("data/properties/") / f"{input_dir.stem}_derived_properties.h5"
+def save_incremental(pid: str, props: dict, output_h5: Path) -> None:
+    """Append a single protein's result to the HDF5 file immediately.
+
+    Writing is done in the main process after each completed future (parallel)
+    or each iteration (sequential), so there is no concurrent access to the file.
+    """
+    output_h5.parent.mkdir(parents=True, exist_ok=True)
+    save_properties_to_h5({pid: props}, output_h5)
+
+
+def handle_result(pid, props, output_h5: Path, results_count: list) -> None:
+    """Validate, persist, and tally a single protein result."""
+    if "error" in props:
+        logging.error(f"Protein {pid}: {props['error']}")
+    else:
+        save_incremental(pid, props, output_h5)
+        results_count[0] += 1
+
+
+def run_sequential(directories, args, output_h5: Path) -> int:
+    results_count = [0]  # mutable counter
+    for d in tqdm(directories):
+        pdb, xtc = resolve_filenames(d, args.pdb_name, args.xtc_name, args.dynamic)
+        try:
+            pid, props = process_single_protein(d, **submit_kwargs(d, pdb, xtc, args))
+            handle_result(pid, props, output_h5, results_count)
+        except Exception as e:
+            logging.error(f"Critical process failure for {d.name}: {e}")
+    return results_count[0]
+
+
+def run_parallel(directories, args, output_h5: Path) -> int:
+    results_count = [0]  # mutable counter
+    with concurrent.futures.ProcessPoolExecutor(max_workers=args.workers) as executor:
+        futures = {
+            executor.submit(
+                process_single_protein, d,
+                **submit_kwargs(d, *resolve_filenames(d, args.pdb_name, args.xtc_name, args.dynamic), args)
+            ): d
+            for d in directories
+        }
+        # Results are collected and saved in the main process, so HDF5
+        # writes are always sequential — no locking needed.
+        for future in tqdm(concurrent.futures.as_completed(futures), total=len(futures)):
+            protein_dir = futures[future]
+            try:
+                pid, props = future.result()
+                handle_result(pid, props, output_h5, results_count)
+            except Exception as e:
+                logging.error(f"Critical process failure for {protein_dir.name}: {e}")
+    return results_count[0]
+
 
 def main():
     args = parse_args()
 
     directories = [d for d in args.input_dir.iterdir() if d.is_dir()]
-    output_h5 = get_output_path(args.input_dir) 
+    output_h5 = get_output_path(args.input_dir)
     already_done = get_already_processed(output_h5)
 
     directories = [d for d in directories if d.name not in already_done]
     print(f"Skipping {len(already_done)} already-processed proteins.")
     print(f"Remaining: {len(directories)} to process.")
+
     if args.debug:
         directories = directories[:5]
 
@@ -136,13 +148,12 @@ def main():
         return
 
     print(f"Found {len(directories)} proteins. Processing with {args.workers} workers...")
+    print(f"Results will be incrementally saved to: {output_h5}")
 
-    results_dict = run_sequential(directories, args) if args.workers == 1 else run_parallel(directories, args)
+    runner = run_sequential if args.workers == 1 else run_parallel
+    n_saved = runner(directories, args, output_h5)
 
-    if results_dict:
-        save_results(results_dict, args.input_dir)
-    else:
-        print("No successful results to save.")
+    print(f"Done. Successfully processed {n_saved} proteins. Output: {output_h5}")
 
 
 if __name__ == "__main__":
