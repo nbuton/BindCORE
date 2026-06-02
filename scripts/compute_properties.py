@@ -1,9 +1,13 @@
+import os
+os.environ["HDF5_USE_FILE_LOCKING"] = "FALSE"
+
 import argparse
 import logging
 import concurrent.futures
 from pathlib import Path
 import h5py
 from tqdm import tqdm
+from filelock import FileLock 
 
 from bindcore.data.properties_extraction import (
     process_single_protein,
@@ -44,6 +48,15 @@ def parse_args():
         help="Number of trajectory frames to use. -1 means all.",
     )
     parser.add_argument(
+        "--job_index", type=int, default=0,
+        help="0-based index of this job within the OAR array (default: 0).",
+    )
+    parser.add_argument(
+        "--n_jobs", type=int, default=1,
+        help="Total number of jobs in the OAR array. Directories are sharded "
+             "across jobs via modulo so each job processes a non-overlapping subset.",
+    )
+    parser.add_argument(
         "--debug", action="store_true",
     )
     return parser.parse_args()
@@ -68,47 +81,56 @@ def get_output_path(input_dir: Path) -> Path:
     return Path("data/properties/") / f"{input_dir.stem}_derived_properties.h5"
 
 
+def get_lock_path(output_h5: Path) -> Path:
+    """One lock file per HDF5 output, shared across all concurrent instances."""
+    return output_h5.with_suffix(".lock")
+
+
 def get_already_processed(output_h5: Path) -> set[str]:
-    """Return the set of protein IDs already present in the HDF5 file."""
+    """Return the set of protein IDs already present in the HDF5 file.
+
+    Must be called while holding the file lock when used for deduplication.
+    """
     if not output_h5.exists():
         return set()
     with h5py.File(output_h5, "r") as h5f:
         return set(h5f.keys())
 
 
-def save_incremental(pid: str, props: dict, output_h5: Path) -> None:
-    """Append a single protein's result to the HDF5 file immediately.
+def save_incremental(pid: str, props: dict, output_h5: Path, lock: FileLock) -> None:
+    """Append a single protein's result to the HDF5 file.
 
-    Writing is done in the main process after each completed future (parallel)
-    or each iteration (sequential), so there is no concurrent access to the file.
+    The lock serialises all writers across concurrent jobs. The re-check inside
+    the lock closes any startup race between jobs launched simultaneously.
     """
-    output_h5.parent.mkdir(parents=True, exist_ok=True)
-    save_properties_to_h5({pid: props}, output_h5)
+    with lock:
+        if pid not in get_already_processed(output_h5):
+            save_properties_to_h5({pid: props}, output_h5)
 
 
-def handle_result(pid, props, output_h5: Path, results_count: list) -> None:
+def handle_result(pid, props, output_h5: Path, lock: FileLock, results_count: list) -> None:
     """Validate, persist, and tally a single protein result."""
     if "error" in props:
         logging.error(f"Protein {pid}: {props['error']}")
     else:
-        save_incremental(pid, props, output_h5)
+        save_incremental(pid, props, output_h5, lock)
         results_count[0] += 1
 
 
-def run_sequential(directories, args, output_h5: Path) -> int:
-    results_count = [0]  # mutable counter
+def run_sequential(directories, args, output_h5: Path, lock: FileLock) -> int:
+    results_count = [0]
     for d in tqdm(directories):
         pdb, xtc = resolve_filenames(d, args.pdb_name, args.xtc_name, args.dynamic)
         try:
             pid, props = process_single_protein(d, **submit_kwargs(d, pdb, xtc, args))
-            handle_result(pid, props, output_h5, results_count)
+            handle_result(pid, props, output_h5, lock, results_count)
         except Exception as e:
             logging.error(f"Critical process failure for {d.name}: {e}")
     return results_count[0]
 
 
-def run_parallel(directories, args, output_h5: Path) -> int:
-    results_count = [0]  # mutable counter
+def run_parallel(directories, args, output_h5: Path, lock: FileLock) -> int:
+    results_count = [0]
     with concurrent.futures.ProcessPoolExecutor(max_workers=args.workers) as executor:
         futures = {
             executor.submit(
@@ -117,13 +139,11 @@ def run_parallel(directories, args, output_h5: Path) -> int:
             ): d
             for d in directories
         }
-        # Results are collected and saved in the main process, so HDF5
-        # writes are always sequential — no locking needed.
         for future in tqdm(concurrent.futures.as_completed(futures), total=len(futures)):
             protein_dir = futures[future]
             try:
                 pid, props = future.result()
-                handle_result(pid, props, output_h5, results_count)
+                handle_result(pid, props, output_h5, lock, results_count)
             except Exception as e:
                 logging.error(f"Critical process failure for {protein_dir.name}: {e}")
     return results_count[0]
@@ -132,28 +152,44 @@ def run_parallel(directories, args, output_h5: Path) -> int:
 def main():
     args = parse_args()
 
-    directories = [d for d in args.input_dir.iterdir() if d.is_dir()]
+    # Sort for consistent ordering across all jobs — required for modulo sharding.
+    directories = sorted([d for d in args.input_dir.iterdir() if d.is_dir()])
     output_h5 = get_output_path(args.input_dir)
-    already_done = get_already_processed(output_h5)
+    
+    # CRITICAL FIX 2: Ensure the parent directory exists BEFORE creating the FileLock
+    output_h5.parent.mkdir(parents=True, exist_ok=True)
+    
+    # Create the lock
+    lock = FileLock(get_lock_path(output_h5))
 
+    # CRITICAL FIX 3: Wrap the startup read inside the FileLock. 
+    # If another OAR job is writing its first result, this job will patiently queue 
+    # rather than crashing on a corrupted/half-written HDF5 state.
+    with lock:
+        already_done = get_already_processed(output_h5)
+        
     directories = [d for d in directories if d.name not in already_done]
-    print(f"Skipping {len(already_done)} already-processed proteins.")
-    print(f"Remaining: {len(directories)} to process.")
+
+    # Shard directories across OAR array jobs using modulo.
+    if args.n_jobs > 1:
+        directories = [d for i, d in enumerate(directories) if i % args.n_jobs == args.job_index]
+
+    print(f"[Job {args.job_index}/{args.n_jobs}] Skipping {len(already_done)} already-processed proteins.")
+    print(f"[Job {args.job_index}/{args.n_jobs}] Assigned {len(directories)} proteins to this job.")
 
     if args.debug:
         directories = directories[:5]
 
     if not directories:
-        print(f"No subdirectories found in {args.input_dir}")
+        print(f"[Job {args.job_index}/{args.n_jobs}] Nothing left to do.")
         return
 
-    print(f"Found {len(directories)} proteins. Processing with {args.workers} workers...")
-    print(f"Results will be incrementally saved to: {output_h5}")
+    print(f"Processing with {args.workers} workers. Output: {output_h5}")
 
     runner = run_sequential if args.workers == 1 else run_parallel
-    n_saved = runner(directories, args, output_h5)
+    n_saved = runner(directories, args, output_h5, lock)
 
-    print(f"Done. Successfully processed {n_saved} proteins. Output: {output_h5}")
+    print(f"[Job {args.job_index}/{args.n_jobs}] Done. Saved {n_saved} proteins.")
 
 
 if __name__ == "__main__":
