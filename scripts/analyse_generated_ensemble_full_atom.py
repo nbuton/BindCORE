@@ -752,7 +752,13 @@ def analyse_protein(
         row["frame_fully_ok"] = all([bl_ok, angle_ok, clash_ok, omega_ok, rama_ok])
 
         rows.append(row)
-
+    try:
+        u.trajectory.close()
+    except Exception:
+        pass
+    del cache, clash_cache, angle_cache, omega_cache, rama_cache
+    del protein_ag, heavy_ag
+    del u
     return rows
 
 
@@ -767,13 +773,18 @@ def _safe_round(v, decimals: int = 5):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
-def _worker(args: tuple[Path, str, int, int]) -> list[dict]:
-    protein_dir, source, frames_per_protein, seed = args
+def _worker(args: tuple[Path, str, int, int, Path]) -> str | None:
+    protein_dir, source, frames_per_protein, seed, output_dir = args
     try:
-        return analyse_protein(protein_dir, source, frames_per_protein, seed)
+        rows = analyse_protein(protein_dir, source, frames_per_protein, seed)
+        if rows:
+            out = Path(output_dir) / f"{protein_dir.name}.csv"
+            pd.DataFrame(rows).to_csv(out, index=False)
+            return protein_dir.name
+        return None
     except Exception as exc:
         print(f"  [WORKER ERROR] {protein_dir.name}: {exc}", flush=True)
-        return []
+        return None
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1027,7 +1038,7 @@ def main():
     parser.add_argument(
         "--limit_n_prot",
         type=int,
-        default=2000,
+        default=-1,
         help="Maximum number of protein directories to process.",
     )
     parser.add_argument(
@@ -1067,6 +1078,9 @@ def main():
     DATA_ROOT = Path(args.input_dir)
     OUTPUT_DIR = Path(args.output_dir)
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    tmp_dir = OUTPUT_DIR / "tmp_per_protein"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+
 
     if not DATA_ROOT.exists():
         sys.exit(f"Input directory not found: {DATA_ROOT}")
@@ -1078,8 +1092,12 @@ def main():
 
     random.seed(args.seed)
     all_dirs = [d for d in DATA_ROOT.iterdir() if d.is_dir()]
-    n_sample = min(args.limit_n_prot, len(all_dirs))
-    prot_dirs = random.sample(all_dirs, n_sample)
+    if args.limit_n_prot == -1:
+        n_sample = len(all_dirs)
+        prot_dirs = all_dirs
+    else:
+        n_sample = min(args.limit_n_prot, len(all_dirs))
+        prot_dirs = random.sample(all_dirs, n_sample)
     frame_msg = (
         "all frames"
         if args.frames_per_protein == -1
@@ -1096,33 +1114,22 @@ def main():
     write_header = not per_frame_path.exists() or per_frame_path.stat().st_size == 0
     all_rows_buf: list[dict] = []
 
-    tasks = [(d, args.source, args.frames_per_protein, args.seed) for d in prot_dirs]
+    tasks = [(d, args.source, args.frames_per_protein, args.seed, tmp_dir)
+         for d in prot_dirs]
 
+    completed = []
     with mp.Pool(processes=args.workers) as pool:
-        for rows in tqdm(
-            pool.imap_unordered(_worker, tasks, chunksize=1),
-            total=len(tasks),
-            desc="proteins",
-        ):
-            all_rows_buf.extend(rows)
+        for name in tqdm(pool.imap_unordered(_worker, tasks, chunksize=1),
+                        total=len(tasks), desc="proteins"):
+            if name:
+                completed.append(name)
 
-            # Stream chunks to disk to keep memory bounded
-            if len(all_rows_buf) >= args.chunk_size:
-                chunk_df = pd.DataFrame(all_rows_buf)
-                chunk_df.to_csv(
-                    per_frame_path,
-                    mode="a",
-                    header=write_header,
-                    index=False,
-                )
-                write_header = False
-                all_rows_buf.clear()
-
-    # Flush remainder
-    if all_rows_buf:
-        pd.DataFrame(all_rows_buf).to_csv(
-            per_frame_path, mode="a", header=write_header, index=False
-        )
+    # Concatenate all per-protein files once at the end
+    df = pd.concat(
+        [pd.read_csv(tmp_dir / f"{name}.csv") for name in completed],
+        ignore_index=True,
+    )
+    df.to_csv(per_frame_path, index=False)
 
     if not per_frame_path.exists() or per_frame_path.stat().st_size == 0:
         sys.exit("No data collected. Check input paths and file naming.")
