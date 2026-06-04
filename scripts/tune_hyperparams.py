@@ -37,7 +37,13 @@ FEATURE_SETS: dict[str, list[str]] = {
     "scalar_only": ["scalar_features"],
     "scalar_local": ["scalar_features", "local_features"],
     "scalar_local_pairwise": ["scalar_features", "local_features", "pairwise_features"],
-    "all_structural": [
+    "scalar_local_pairwise_res": [
+        "token_embedding",
+        "scalar_features",
+        "local_features",
+        "pairwise_features",
+    ],
+    "scalar_local_pairwise_res_pos": [
         "token_embedding",
         "positional_embeddings",
         "scalar_features",
@@ -306,6 +312,7 @@ def trainable(
                 loaded_cfg,
                 search_space_path,
                 threshold_selection=False,
+                model_saving=False,
                 device=device,
             )
             auc = trainer.run()
@@ -396,7 +403,7 @@ def main() -> None:
         search_space_path=str(search_space_path),
         device=args.device,
         max_epochs=args.max_epochs,
-        num_seeds=2,
+        num_seeds=args.num_seeds,
     )
 
     tuner = tune.Tuner(

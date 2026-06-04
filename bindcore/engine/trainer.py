@@ -77,12 +77,13 @@ def get_config(yaml_path: str) -> FullConfig:
 
 
 class bindcore_Trainer:
-    def __init__(self, cfg, config_path, threshold_selection=True, device="cpu"):
+    def __init__(self, cfg, config_path, threshold_selection=True, model_saving=True, device="cpu"):
         self.cfg = cfg
         self.train_cfg = cfg.training
         self.model_cfg = cfg.model
         self.device = torch.device(device)
         self.threshold_selection = threshold_selection
+        self.model_saving=model_saving
 
         # Paths
         self.config_dir = os.path.dirname(os.path.abspath(config_path))
@@ -347,7 +348,8 @@ class bindcore_Trainer:
                 if val_pr_auc > best_pr_auc:
                     best_pr_auc = val_pr_auc
                     best_val_loss = val_loss
-                    self.save_checkpoint(auc=best_pr_auc)
+                    if self.model_saving:
+                        self.save_checkpoint(auc=best_pr_auc)
                 else:
                     print(f"  - PR-AUC did not improve, checkpoint not updated.")
 
@@ -362,7 +364,8 @@ class bindcore_Trainer:
                 if epoch == self.train_cfg.epochs:
                     if self.train_cfg.use_ema and bool(self.ema_shadow):
                         self._apply_ema()
-                    self.save_checkpoint(is_final=True)
+                    if self.model_saving:
+                        self.save_checkpoint(is_final=True)
 
         if self.threshold_selection:
             checkpoint = torch.load(
