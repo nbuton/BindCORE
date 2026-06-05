@@ -144,11 +144,13 @@ class bindcore_Trainer:
             seq_df = pd.DataFrame({"id": ids, "sequence": seqs})
             id_to_idx = {pid: i for i, pid in enumerate(ids)}
 
-            cluster_df = cluster_sequences_mmseqs2(
-                seq_df, output_file="data/TR1000_cluster.csv", seq_identity=0.3
+           # 1. Updated to expect a dictionary and write to a JSON file
+            cluster_dict = cluster_sequences_mmseqs2(
+                seq_df, output_file="data/mmseqs2_cluster.yaml", seq_identity=0.3
             )
 
-            all_clusters = cluster_df["cluster"].unique()
+            # 2. Get all cluster IDs from the dictionary keys
+            all_clusters = list(cluster_dict.keys())
             rng = np.random.default_rng(self.train_cfg.seed)
             rng.shuffle(all_clusters)
 
@@ -157,10 +159,11 @@ class bindcore_Trainer:
             val_clusters = all_clusters[:n_val_clusters]
             train_clusters = all_clusters[n_val_clusters:]
 
-            val_ids = cluster_df[cluster_df["cluster"].isin(val_clusters)]["id"] # All sequences ids that are in the wanted cluster
-            val_indices = [id_to_idx[pid] for pid in val_ids if pid in id_to_idx] # Get the index in the dataset of these sequences ids and also exclude sequence ids that are not present in this dataset
+            # 3. Flatten the sequence ID lists for the chosen clusters
+            val_ids = [pid for cid in val_clusters for pid in cluster_dict[cid]]
+            val_indices = [id_to_idx[pid] for pid in val_ids if pid in id_to_idx]
 
-            train_ids = cluster_df[cluster_df["cluster"].isin(train_clusters)]["id"]
+            train_ids = [pid for cid in train_clusters for pid in cluster_dict[cid]]
             train_indices = [id_to_idx[pid] for pid in train_ids if pid in id_to_idx]
 
             print(

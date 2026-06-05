@@ -7,6 +7,7 @@ Data preparation, parsing, feature extraction, and I/O utilities.
 from __future__ import annotations
 
 import csv
+import yaml
 import os
 import subprocess
 import sys
@@ -274,25 +275,29 @@ def get_all_feature_stats(X_scalar_list, X_local_list, X_pairwise_list):
 # 4. Clustering (External Tool Dispatch)
 # ===========================================================================
 
-
 def cluster_sequences_mmseqs2(
     df: pd.DataFrame,
     sequence_col: str = "sequence",
     id_col: str = "id",
-    output_file: str = "data/TR1000_cluster.csv",
+    output_file: str = "data/mmseqs2_cluster.yaml",  # Changed extension to .yaml
     seq_identity: float = 0.3,
-) -> pd.DataFrame:
+) -> dict:
     """Cluster sequences using MMseqs2 at a given sequence identity threshold."""
     # --- Cache Verification Logic ---
     if os.path.exists(output_file):
-        cached_df = pd.read_csv(output_file)
+        with open(output_file, "r", encoding="utf-8") as f:
+            # safe_load automatically restores integer keys cleanly
+            cached_dict = yaml.safe_load(f) or {}
 
-        # Check if all IDs in the current input df exist in the cached file
-        missing_ids = set(df[id_col]) - set(cached_df[id_col])
+        # Flatten all sequence IDs in the cached dictionary to check coverage
+        cached_ids = set(
+            seq_id for seq_list in cached_dict.values() for seq_id in seq_list
+        )
+        missing_ids = set(df[id_col]) - cached_ids
 
         if not missing_ids:
             print(f"[clustering] {output_file} exists and contains all IDs. Loading.")
-            return cached_df
+            return cached_dict
         else:
             print(
                 f"[clustering] {len(missing_ids)} IDs missing from cache. Re-clustering..."
@@ -354,15 +359,17 @@ def cluster_sequences_mmseqs2(
     rep_to_idx = {rep: idx for idx, rep in enumerate(reps)}
     cluster_df["cluster"] = cluster_df["cluster_representative"].map(rep_to_idx)
 
-    result = df[[id_col, sequence_col]].merge(
-        cluster_df[[id_col, "cluster"]], on=id_col, how="left"
-    )
+    # Group by unique cluster integer mapping to a list of original sequence IDs
+    cluster_dict = cluster_df.groupby("cluster")[id_col].apply(list).to_dict()
 
-    result.to_csv(output_file, index=False)
-    print(f"[clustering] Done. {result['cluster'].nunique()} clusters found.")
+    # Save to clean human-readable YAML format
+    with open(output_file, "w", encoding="utf-8") as f:
+        yaml.dump(cluster_dict, f, default_flow_style=False)
+
+    print(f"[clustering] Done. {len(cluster_dict)} clusters found.")
     print(f"[clustering] Saved to {output_file}")
 
-    return result
+    return cluster_dict
 
 
 def ham_mask_val_labels(
