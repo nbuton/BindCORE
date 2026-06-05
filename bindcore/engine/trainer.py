@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import math
 import os
-
+from pathlib import Path
 os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
 import random
 
@@ -117,6 +117,8 @@ class bindcore_Trainer:
                 self.train_cfg.PAIRWISE_FEATURES,
             )
 
+        project_root = Path(__file__).resolve().parent.parent.parent
+        plm_h5_path = os.path.join(project_root, "data/embeddings/esm3-large-2024-03_merged.h5")
         self.dataset = ProteinDataset(
             X_scalar,
             X_local,
@@ -125,7 +127,7 @@ class bindcore_Trainer:
             y_list,
             ids=ids,
             plm_h5_path=(
-                "data/embeddings/esm3-large-2024-03_merged.h5"
+                plm_h5_path
                 if self.model_cfg.use_plm_embedding
                 else None
             ),
