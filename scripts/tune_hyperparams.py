@@ -18,6 +18,7 @@ import numpy as np
 from typing import Any
 import torch
 import yaml
+from typing import Union
 
 # -- Ray Tune -----------------------------------------------------------------
 import ray
@@ -64,7 +65,7 @@ DILATION_PRESETS: dict[str, list[int]] = {
 # Use a list of keys to fan one param out to multiple config fields.
 # Maps flat param name -> (config section, config key).
 # Use a list of keys to fan one param out to multiple config fields.
-PARAM_TO_CONFIG: dict[str, tuple[str, str | list[str]]] = {
+PARAM_TO_CONFIG: dict[str, tuple[str, Union[str, list[str]]]] = {
     # training
     "optimizer": ("training", "optimizer"),
     "lr": ("training", "lr"),

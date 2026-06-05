@@ -19,3 +19,4 @@ env_CORE_LIP/*
 *.stderr
 *.pdf
 logs/*
+oar_logs/*
