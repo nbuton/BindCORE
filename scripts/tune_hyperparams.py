@@ -33,26 +33,6 @@ from bindcore.engine.trainer import bindcore_Trainer, get_config
 # Preset look-up tables
 # -----------------------------------------------------------------------------
 
-FEATURE_SETS: dict[str, list[str]] = {
-    "plm_only": ["plm_embedding"],
-    "scalar_only": ["scalar_features"],
-    "scalar_local": ["scalar_features", "local_features"],
-    "scalar_local_pairwise": ["scalar_features", "local_features", "pairwise_features"],
-    "scalar_local_pairwise_res": [
-        "token_embedding",
-        "scalar_features",
-        "local_features",
-        "pairwise_features",
-    ],
-    "scalar_local_pairwise_res_pos": [
-        "token_embedding",
-        "positional_embeddings",
-        "scalar_features",
-        "local_features",
-        "pairwise_features",
-    ],
-}
-
 DILATION_PRESETS: dict[str, list[int]] = {
     "none": [1],
     "narrow": [1, 2, 4],
@@ -83,11 +63,16 @@ PARAM_TO_CONFIG: dict[str, tuple[str, Union[str, list[str]]]] = {
     "dropout": ("model", "dropout"),
     "share_block_weights": ("model", "share_block_weights"),
     "activate_classical_attention": ("model", "activate_classical_attention"),
+    "use_scalar_features": ("model", "use_scalar_features"),
+    "use_local_features": ("model", "use_local_features"),
+    "use_pairwise_features": ("model", "use_pairwise_features"),
+    "use_token_embedding": ("model", "use_token_embedding"),
+    "use_positional_embeddings": ("model", "use_positional_embeddings"),
+    "use_plm_embedding": ("model", "use_plm_embedding"),
     # MLP hidden mapping
     "mlp_hidden": ("model", ["local_mlp_hidden", "scalar_mlp_hidden"]),
     "local_mlp_hidden": ("model", "local_mlp_hidden"),
     "scalar_mlp_hidden": ("model", "scalar_mlp_hidden"),
-    "inputs_features": ("model", "inputs_features"),  # expanded via FEATURE_SETS
     "activate_pairwise_bias": ("model", "activate_pairwise_bias"),
     "pairwise_cnn_channels": ("model", "pairwise_cnn_channels"),
     "pairwise_cnn_kernel": ("model", "pairwise_cnn_kernel"),
@@ -125,9 +110,7 @@ def build_config_from_trial(trial_params: dict, static_cfg: dict) -> dict:
         section, key = PARAM_TO_CONFIG[param]
 
         # Expand preset keys
-        if param == "inputs_features":
-            value = FEATURE_SETS[value]
-        elif param == "dilatations_cnn":
+        if param == "dilatations_cnn":
             value = DILATION_PRESETS[value]
 
         cfg.setdefault(section, {})
@@ -237,9 +220,9 @@ def load_search_space_yaml(path: str) -> tuple[dict, dict]:
     batch_size:
       value: 2              # fixed
 
-    inputs_features:
+    use_scalar_features:
       type: choice
-      values: [scalar_only, scalar_local, scalar_local_pairwise, all]
+      values: [true, false]
     """
     with open(path) as f:
         raw: dict = yaml.safe_load(f)

@@ -15,12 +15,12 @@ class ProteinModelConfig(BaseModel):
     nb_scalar: int = 16
     nb_local: int = 32
     nb_pairwise: int = 8
-    inputs_features: List = [
-        "seq_emb",
-        "scalar_features",
-        "local_features",
-        "pairwise_features",
-    ]
+    use_scalar_features: bool = True
+    use_local_features: bool = True
+    use_pairwise_features: bool = True
+    use_token_embedding: bool = False
+    use_positional_embeddings: bool = False
+    use_plm_embedding: bool = False
 
     # ── Embedding / model width ───────────────────────────────────────────
     embed_dim: int = 128
@@ -51,6 +51,62 @@ class ProteinModelConfig(BaseModel):
     plm_dim: int = 6144
 
     # ── Post-Initialization & Validation ──────────────────────────────────
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_legacy_inputs_features(cls, data):
+        if not isinstance(data, dict) or "inputs_features" not in data:
+            return data
+
+        migrated = data.copy()
+        legacy_value = migrated.pop("inputs_features") or []
+        if isinstance(legacy_value, str):
+            legacy_value = {
+                "plm_only": ["plm_embedding"],
+                "scalar_only": ["scalar_features"],
+                "scalar_local": ["scalar_features", "local_features"],
+                "scalar_local_pairwise": [
+                    "scalar_features",
+                    "local_features",
+                    "pairwise_features",
+                ],
+                "scalar_local_pairwise_res": [
+                    "token_embedding",
+                    "scalar_features",
+                    "local_features",
+                    "pairwise_features",
+                ],
+                "scalar_local_pairwise_res_pos": [
+                    "token_embedding",
+                    "positional_embeddings",
+                    "scalar_features",
+                    "local_features",
+                    "pairwise_features",
+                ],
+                "all_structural": [
+                    "token_embedding",
+                    "scalar_features",
+                    "local_features",
+                    "pairwise_features",
+                ],
+            }.get(legacy_value, [legacy_value])
+
+        inputs_features = set(legacy_value)
+        if "seq_emb" in inputs_features:
+            inputs_features.add("token_embedding")
+
+        feature_flags = {
+            "scalar_features": "use_scalar_features",
+            "local_features": "use_local_features",
+            "pairwise_features": "use_pairwise_features",
+            "token_embedding": "use_token_embedding",
+            "positional_embeddings": "use_positional_embeddings",
+            "plm_embedding": "use_plm_embedding",
+        }
+        for feature_name, flag_name in feature_flags.items():
+            migrated.setdefault(flag_name, feature_name in inputs_features)
+
+        return migrated
+
     @model_validator(mode="after")
     def validate_and_set_defaults(self) -> "ProteinModelConfig":
         # 1. Set dynamic defaults

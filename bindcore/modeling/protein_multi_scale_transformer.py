@@ -631,17 +631,24 @@ class ProteinMultiScaleTransformer(nn.Module):
         super().__init__()
         self.cfg = cfg
         self.E = cfg.embed_dim
-        self.inputs_features = cfg.inputs_features
+        self.use_scalar_features = cfg.use_scalar_features
+        self.use_local_features = cfg.use_local_features
+        self.use_pairwise_features = cfg.use_pairwise_features
+        self.use_token_embedding = cfg.use_token_embedding
+        self.use_plm_embedding = cfg.use_plm_embedding
         self.share_block_weights = (
             cfg.share_block_weights
         )  # Universal Transformer style
 
         # ── Input embeddings ──────────────────────────────────────────────
-        use_pos_embedding = "positional_embeddings" in self.inputs_features
         self.seq_emb = SequenceEmbedding(
-            cfg.vocab_size, self.E, cfg.max_seq_len, cfg.dropout, use_pos_embedding
+            cfg.vocab_size,
+            self.E,
+            cfg.max_seq_len,
+            cfg.dropout,
+            cfg.use_positional_embeddings,
         )
-        if "plm_embedding" in self.inputs_features:
+        if self.use_plm_embedding:
             self.plm_proj = nn.Sequential(
                 nn.Linear(cfg.plm_dim, self.E),
                 nn.Dropout(0.6),
@@ -719,19 +726,19 @@ class ProteinMultiScaleTransformer(nn.Module):
         # 1. Build initial [B, L, E] embedding
         x = torch.zeros((B, L, self.E), device=tokens.device)
 
-        if "token_embedding" in self.inputs_features:
+        if self.use_token_embedding:
             x = self.seq_emb(tokens)
 
-        if "scalar_features" in self.inputs_features:
+        if self.use_scalar_features:
             x = x + self.scalar_proj(x_scalar, L)
 
-        if "local_features" in self.inputs_features:
+        if self.use_local_features:
             x = x + self.local_proj(x_local)
 
-        if "pairwise_features" in self.inputs_features:
+        if self.use_pairwise_features:
             x = x + self.pairwise_init_proj(x_pairwise_scaled)
 
-        if "plm_embedding" in self.inputs_features:
+        if self.use_plm_embedding:
             x = x + self.plm_proj(plm_pad)
 
         x = self.embed_norm(x)

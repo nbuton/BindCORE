@@ -21,11 +21,20 @@ def main() -> None:
 
     # Mapping for the loop
     groups = {
-        "SCALAR_FEATURES": {"input_key": "scalar_features", "dim_attr": "nb_scalar"},
-        "LOCAL_FEATURES": {"input_key": "local_features", "dim_attr": "nb_local"},
+        "SCALAR_FEATURES": {
+            "input_key": "scalar_features",
+            "dim_attr": "nb_scalar",
+            "use_flag": "use_scalar_features",
+        },
+        "LOCAL_FEATURES": {
+            "input_key": "local_features",
+            "dim_attr": "nb_local",
+            "use_flag": "use_local_features",
+        },
         "PAIRWISE_FEATURES": {
             "input_key": "pairwise_features",
             "dim_attr": "nb_pairwise",
+            "use_flag": "use_pairwise_features",
         },
     }
 
@@ -56,7 +65,13 @@ def main() -> None:
             run_cfg.model.nb_pairwise = 0
 
             setattr(run_cfg.model, meta["dim_attr"], 1)
-            run_cfg.model.inputs_features = [meta["input_key"]]
+            run_cfg.model.use_scalar_features = False
+            run_cfg.model.use_local_features = False
+            run_cfg.model.use_pairwise_features = False
+            run_cfg.model.use_token_embedding = False
+            run_cfg.model.use_positional_embeddings = False
+            run_cfg.model.use_plm_embedding = False
+            setattr(run_cfg.model, meta["use_flag"], True)
 
             try:
                 # Initialize and run

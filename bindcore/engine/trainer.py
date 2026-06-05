@@ -126,7 +126,7 @@ class bindcore_Trainer:
             ids=ids,
             plm_h5_path=(
                 "data/embeddings/esm3-large-2024-03_merged.h5"
-                if "plm_embedding" in self.model_cfg.inputs_features
+                if self.model_cfg.use_plm_embedding
                 else None
             ),
         )
