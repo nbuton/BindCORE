@@ -142,6 +142,8 @@ class bindcore_Trainer:
             val_indices = []
         else:
             seq_df = pd.DataFrame({"id": ids, "sequence": seqs})
+            id_to_idx = {pid: i for i, pid in enumerate(ids)}
+
             cluster_df = cluster_sequences_mmseqs2(
                 seq_df, output_file="data/TR1000_cluster.csv", seq_identity=0.3
             )
@@ -150,24 +152,26 @@ class bindcore_Trainer:
             rng = np.random.default_rng(self.train_cfg.seed)
             rng.shuffle(all_clusters)
 
-            n_val_clusters = max(1, int(val_prop * len(all_clusters)))
-            val_clusters = set(all_clusters[:n_val_clusters])
+            n_val_clusters = int(val_prop * len(all_clusters))
+            
+            val_clusters = all_clusters[:n_val_clusters]
+            train_clusters = all_clusters[n_val_clusters:]
 
-            val_ids = set(cluster_df[cluster_df["cluster"].isin(val_clusters)]["id"])
-            id_to_idx = {pid: i for i, pid in enumerate(ids)}
+            val_ids = cluster_df[cluster_df["cluster"].isin(val_clusters)]["id"] # All sequences ids that are in the wanted cluster
+            val_indices = [id_to_idx[pid] for pid in val_ids if pid in id_to_idx] # Get the index in the dataset of these sequences ids and also exclude sequence ids that are not present in this dataset
 
-            val_indices = [id_to_idx[pid] for pid in val_ids if pid in id_to_idx]
-            train_indices = [i for i in range(len(ids)) if i not in set(val_indices)]
+            train_ids = cluster_df[cluster_df["cluster"].isin(train_clusters)]["id"]
+            train_indices = [id_to_idx[pid] for pid in train_ids if pid in id_to_idx]
 
             print(
                 f"[split] OOD split: {len(train_indices)} train, {len(val_indices)} val proteins."
             )
             # HAM-equivalent: mask val residues locally homologous to training sequences
-            ham_mask_val_labels(
-                val_indices=val_indices,
-                train_indices=train_indices,
-                dataset=self.dataset,
-            )
+            # ham_mask_val_labels(
+            #     val_indices=val_indices,
+            #     train_indices=train_indices,
+            #     dataset=self.dataset,
+            # )
 
         loader_kwargs = dict(
             batch_size=self.train_cfg.batch_size,

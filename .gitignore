@@ -20,3 +20,5 @@ env_CORE_LIP/*
 *.pdf
 logs/*
 oar_logs/*
+OLD_oar_logs/*
+OLD_ray_results/*
