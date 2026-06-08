@@ -302,74 +302,78 @@ def cluster_sequences_mmseqs2(
             print(
                 f"[clustering] {len(missing_ids)} IDs missing from cache. Re-clustering..."
             )
+    # If the cache file for cluster does not exists
+    accept_reclustering = input("Do you want to recluster?(y/n) This will change the validation set order")
+    if accept_reclustering.lower()=='y' or accept_reclustering.lower()=='yes':
+        os.makedirs(os.path.dirname(output_file), exist_ok=True)
 
-    os.makedirs(os.path.dirname(output_file), exist_ok=True)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fasta_path = os.path.join(tmpdir, "input.fasta")
+            db_path = os.path.join(tmpdir, "seqdb")
+            cluster_db = os.path.join(tmpdir, "clusterdb")
+            tmp_path = os.path.join(tmpdir, "tmp")
+            tsv_path = os.path.join(tmpdir, "clusters.tsv")
 
-    with tempfile.TemporaryDirectory() as tmpdir:
-        fasta_path = os.path.join(tmpdir, "input.fasta")
-        db_path = os.path.join(tmpdir, "seqdb")
-        cluster_db = os.path.join(tmpdir, "clusterdb")
-        tmp_path = os.path.join(tmpdir, "tmp")
-        tsv_path = os.path.join(tmpdir, "clusters.tsv")
+            with open(fasta_path, "w", encoding="utf-8") as f:
+                for _, row in df.iterrows():
+                    f.write(f">{row[id_col]}\n{row[sequence_col]}\n")
 
-        with open(fasta_path, "w", encoding="utf-8") as f:
-            for _, row in df.iterrows():
-                f.write(f">{row[id_col]}\n{row[sequence_col]}\n")
+            subprocess.run(
+                ["mmseqs", "createdb", fasta_path, db_path], check=True, capture_output=True
+            )
 
-        subprocess.run(
-            ["mmseqs", "createdb", fasta_path, db_path], check=True, capture_output=True
-        )
+            subprocess.run(
+                [
+                    "mmseqs",
+                    "cluster",
+                    db_path,
+                    cluster_db,
+                    tmp_path,
+                    "--min-seq-id",
+                    str(seq_identity),
+                    "-c",
+                    "0.8",
+                    "--cov-mode",
+                    "0",
+                    "--cluster-mode",
+                    "1",
+                    "--threads",
+                    "4",
+                ],
+                check=True,
+                capture_output=True,
+            )
 
-        subprocess.run(
-            [
-                "mmseqs",
-                "cluster",
-                db_path,
-                cluster_db,
-                tmp_path,
-                "--min-seq-id",
-                str(seq_identity),
-                "-c",
-                "0.8",
-                "--cov-mode",
-                "0",
-                "--cluster-mode",
-                "1",
-                "--threads",
-                "4",
-            ],
-            check=True,
-            capture_output=True,
-        )
+            subprocess.run(
+                ["mmseqs", "createtsv", db_path, db_path, cluster_db, tsv_path],
+                check=True,
+                capture_output=True,
+            )
 
-        subprocess.run(
-            ["mmseqs", "createtsv", db_path, db_path, cluster_db, tsv_path],
-            check=True,
-            capture_output=True,
-        )
+            cluster_df = pd.read_csv(
+                tsv_path,
+                sep="\t",
+                header=None,
+                names=["cluster_representative", id_col],
+            )
 
-        cluster_df = pd.read_csv(
-            tsv_path,
-            sep="\t",
-            header=None,
-            names=["cluster_representative", id_col],
-        )
+        reps = cluster_df["cluster_representative"].unique()
+        rep_to_idx = {rep: idx for idx, rep in enumerate(reps)}
+        cluster_df["cluster"] = cluster_df["cluster_representative"].map(rep_to_idx)
 
-    reps = cluster_df["cluster_representative"].unique()
-    rep_to_idx = {rep: idx for idx, rep in enumerate(reps)}
-    cluster_df["cluster"] = cluster_df["cluster_representative"].map(rep_to_idx)
+        # Group by unique cluster integer mapping to a list of original sequence IDs
+        cluster_dict = cluster_df.groupby("cluster")[id_col].apply(list).to_dict()
 
-    # Group by unique cluster integer mapping to a list of original sequence IDs
-    cluster_dict = cluster_df.groupby("cluster")[id_col].apply(list).to_dict()
+        # Save to clean human-readable YAML format
+        with open(output_file, "w", encoding="utf-8") as f:
+            yaml.dump(cluster_dict, f, default_flow_style=False)
 
-    # Save to clean human-readable YAML format
-    with open(output_file, "w", encoding="utf-8") as f:
-        yaml.dump(cluster_dict, f, default_flow_style=False)
+        print(f"[clustering] Done. {len(cluster_dict)} clusters found.")
+        print(f"[clustering] Saved to {output_file}")
 
-    print(f"[clustering] Done. {len(cluster_dict)} clusters found.")
-    print(f"[clustering] Saved to {output_file}")
-
-    return cluster_dict
+        return cluster_dict
+    else:
+        raise RuntimeError("Cannot continue without re-clustering")
 
 
 def ham_mask_val_labels(

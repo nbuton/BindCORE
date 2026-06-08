@@ -146,9 +146,10 @@ class bindcore_Trainer:
             seq_df = pd.DataFrame({"id": ids, "sequence": seqs})
             id_to_idx = {pid: i for i, pid in enumerate(ids)}
 
-           # 1. Updated to expect a dictionary and write to a JSON file
+            project_root = Path(__file__).resolve().parent.parent.parent
+            mmseq2_cached_cluster = os.path.join(project_root, "data/mmseqs2_cluster.yaml")
             cluster_dict = cluster_sequences_mmseqs2(
-                seq_df, output_file="data/mmseqs2_cluster.yaml", seq_identity=0.3
+                seq_df, output_file=mmseq2_cached_cluster, seq_identity=0.3
             )
 
             # 2. Get all cluster IDs from the dictionary keys

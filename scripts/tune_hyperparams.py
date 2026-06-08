@@ -6,7 +6,7 @@ and tuned parameters (type: + bounds) alike. No separate base config is needed
 at runtime — the YAML IS the full parameter description.
 
 Usage:
-    python tune_train.py --search-space search_space.yaml --device cpu --num-samples 20 --max-epochs 10
+    python tune_train.py --search-space search_space.yaml --device cpu --num-samples 20
 """
 
 import argparse
@@ -273,12 +273,11 @@ def trainable(
     static_cfg: dict,
     search_space_path: str,
     device: str,
-    max_epochs: int,
     num_seeds: int = 1,
 ) -> None:
     """Called by Ray Tune for every trial."""
     cfg = build_config_from_trial(trial_params, static_cfg)
-    cfg.setdefault("training", {})["epochs"] = max_epochs
+    # epochs come from _static_config.training.epochs in the YAML
 
     scores = []
     base_seed = cfg.get("training", {}).get("seed", 42)
@@ -324,12 +323,11 @@ def main() -> None:
         help=(
             "Single YAML that fully describes the experiment. "
             "Use 'value:' to fix a parameter, 'type:' to search it. "
-            "Put non-hyperparameter fields (paths, seed …) under '_static_config:'."
+            "Put non-hyperparameter fields (paths, seed, epochs …) under '_static_config:'."
         ),
     )
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--num-samples", type=int, default=100)
-    parser.add_argument("--max-epochs", type=int, default=20)
     parser.add_argument("--cpus-per-trial", type=float, default=4.0)
     parser.add_argument("--gpus-per-trial", type=float, default=1.0)
     parser.add_argument("--num-seeds", type=int, default=2)
@@ -363,6 +361,13 @@ def main() -> None:
                 if not p.is_absolute():
                     section[key] = str((Path.cwd() / p).resolve())
 
+    max_epochs = static_cfg.get("training", {}).get("epochs")
+    if max_epochs is None:
+        raise ValueError(
+            "Missing '_static_config.training.epochs' in the search-space YAML. "
+            "Add it under '_static_config: training: epochs: <N>'."
+        )
+
     # -- Summary --------------------------------------------------------------
     fixed = [k for k, v in tune_space.items() if _is_fixed(v)]
     tuned = [k for k in tune_space if k not in fixed]
@@ -370,7 +375,7 @@ def main() -> None:
     print(f"Search space  : {search_space_path}")
     print(f"Device        : {args.device}")
     print(f"Num samples   : {args.num_samples}")
-    print(f"Max epochs    : {args.max_epochs}")
+    print(f"Max epochs    : {max_epochs}  (from _static_config)")
     print(f"Output dir    : {args.output_dir}")
     print()
     print(f"Fixed params  ({len(fixed):2d}): {', '.join(fixed) or 'none'}")
@@ -386,7 +391,6 @@ def main() -> None:
         static_cfg=static_cfg,
         search_space_path=str(search_space_path),
         device=args.device,
-        max_epochs=args.max_epochs,
         num_seeds=args.num_seeds,
     )
 

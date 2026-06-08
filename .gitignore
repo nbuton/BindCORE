@@ -22,3 +22,5 @@ logs/*
 oar_logs/*
 OLD_oar_logs/*
 OLD_ray_results/*
+OLD2_oar_logs/*
+OLD2_ray_results/*
