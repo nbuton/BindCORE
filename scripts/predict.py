@@ -26,7 +26,7 @@ from bindcore.engine.predictor import load_checkpoint, predict_dataset
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run BindCore predictions.")
-    parser.add_argument("--model", default="data/models/bindCORE.pt")
+    parser.add_argument("--model", default="data/models/BindCORE_LIP_pLM/bindCORE.pt")
     parser.add_argument("--h5", default="data/protein_MD_properties.h5")
     parser.add_argument(
         "--datasets", nargs="+", default=["data/CLIP_dataset/TE440_reduced.txt"]
@@ -39,7 +39,7 @@ def main() -> None:
     model, checkpoint = load_checkpoint(args.model, device)
     print(f"Loaded checkpoint: {args.model}")
 
-    model_stem = Path(args.model).stem
+    model_stem = Path(args.model).parent.stem
     h5_stem = Path(args.h5).stem
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -47,7 +47,7 @@ def main() -> None:
     with h5py.File(args.h5, "r") as h5_features:
         for dataset_path in args.datasets:
             dataset_stem = Path(dataset_path).stem
-            filename = f"{model_stem}_{h5_stem}_{dataset_stem}.csv"
+            filename = f"{model_stem}_{dataset_stem}.csv"
             output_filepath = str(output_dir / filename)
             print(f"\nRunning inference on: {dataset_path}")
             predict_dataset(

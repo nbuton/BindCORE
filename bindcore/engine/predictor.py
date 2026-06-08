@@ -103,7 +103,7 @@ def predict_dataset(
         X_pairwise,
         seqs,
         ids=ids,
-        # plm_h5_path="data/embeddings/esm3-large-2024-03_merged.h5",
+        plm_h5_path="data/embeddings/esm3-large-2024-03_merged.h5",
     )
     loader = DataLoader(
         dataset,
