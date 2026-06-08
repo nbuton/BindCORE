@@ -279,49 +279,67 @@ def cluster_sequences_mmseqs2(
     df: pd.DataFrame,
     sequence_col: str = "sequence",
     id_col: str = "id",
-    output_file: str = "data/mmseqs2_cluster.yaml",  # Changed extension to .yaml
+    output_file: str = "data/mmseqs2_cluster.yaml",
     seq_identity: float = 0.3,
 ) -> dict:
     """Cluster sequences using MMseqs2 at a given sequence identity threshold."""
+    
+    # We maintain a persistent FASTA file to store all previously seen sequences.
+    fasta_cache = output_file.replace(".yaml", "_sequences.fasta")
+    if not fasta_cache.endswith(".fasta"):
+        fasta_cache += ".fasta"
+        
     # --- Cache Verification Logic ---
+    cached_dict = {}
     if os.path.exists(output_file):
         with open(output_file, "r", encoding="utf-8") as f:
             # safe_load automatically restores integer keys cleanly
             cached_dict = yaml.safe_load(f) or {}
 
-        # Flatten all sequence IDs in the cached dictionary to check coverage
-        cached_ids = set(
-            seq_id for seq_list in cached_dict.values() for seq_id in seq_list
-        )
-        missing_ids = set(df[id_col]) - cached_ids
+    # Flatten all sequence IDs in the cached dictionary to check coverage
+    cached_ids = set(
+        seq_id for seq_list in cached_dict.values() for seq_id in seq_list
+    )
+    missing_ids = set(df[id_col]) - cached_ids
 
-        if not missing_ids:
-            print(f"[clustering] {output_file} exists and contains all IDs. Loading.")
-            return cached_dict
-        else:
-            print(
-                f"[clustering] {len(missing_ids)} IDs missing from cache. Re-clustering..."
-            )
-    # If the cache file for cluster does not exists
-    accept_reclustering = input("Do you want to recluster?(y/n) This will change the validation set order")
-    if accept_reclustering.lower()=='y' or accept_reclustering.lower()=='yes':
+    if not missing_ids:
+        print(f"[clustering] {output_file} exists and contains all IDs. Loading.")
+        return cached_dict
+    else:
+        print(f"[clustering] {len(missing_ids)} IDs missing from cache. Re-clustering...")
+
+    accept_reclustering = input("Do you want to recluster? (This will update clusters for all old and new sequences) (y/n) : ")
+    
+    if accept_reclustering.lower() in ['y', 'yes']:
         os.makedirs(os.path.dirname(output_file), exist_ok=True)
+        
+        # 1. Update the persistent FASTA cache with new sequences
+        if not os.path.exists(fasta_cache):
+            # If fasta cache doesn't exist, we start fresh with the current df
+            with open(fasta_cache, "w", encoding="utf-8") as f:
+                for _, row in df.iterrows():
+                    f.write(f">{row[id_col]}\n{row[sequence_col]}\n")
+            
+            if cached_ids:
+                print("[clustering] Warning: Previous clustering exists but persistent FASTA is missing.")
+                print("[clustering] Only sequences present in the current dataframe will be clustered.")
+        else:
+            # Append ONLY the new sequences to the persistent FASTA
+            missing_df = df[df[id_col].isin(missing_ids)]
+            with open(fasta_cache, "a", encoding="utf-8") as f:
+                for _, row in missing_df.iterrows():
+                    f.write(f">{row[id_col]}\n{row[sequence_col]}\n")
 
+        # 2. Run MMseqs2 on the full combined dataset (all old + new sequences)
         with tempfile.TemporaryDirectory() as tmpdir:
-            fasta_path = os.path.join(tmpdir, "input.fasta")
             db_path = os.path.join(tmpdir, "seqdb")
             cluster_db = os.path.join(tmpdir, "clusterdb")
             tmp_path = os.path.join(tmpdir, "tmp")
             tsv_path = os.path.join(tmpdir, "clusters.tsv")
 
-            with open(fasta_path, "w", encoding="utf-8") as f:
-                for _, row in df.iterrows():
-                    f.write(f">{row[id_col]}\n{row[sequence_col]}\n")
-
             subprocess.run(
-                ["mmseqs", "createdb", fasta_path, db_path], check=True, capture_output=True
+                ["mmseqs", "createdb", fasta_cache, db_path], check=True, capture_output=True
             )
-
             subprocess.run(
                 [
                     "mmseqs",
@@ -343,7 +361,6 @@ def cluster_sequences_mmseqs2(
                 check=True,
                 capture_output=True,
             )
-
             subprocess.run(
                 ["mmseqs", "createtsv", db_path, db_path, cluster_db, tsv_path],
                 check=True,
@@ -362,15 +379,17 @@ def cluster_sequences_mmseqs2(
         cluster_df["cluster"] = cluster_df["cluster_representative"].map(rep_to_idx)
 
         # Group by unique cluster integer mapping to a list of original sequence IDs
-        cluster_dict = cluster_df.groupby("cluster")[id_col].apply(list).to_dict()
+        raw_cluster_dict = cluster_df.groupby("cluster")[id_col].apply(list).to_dict()
+        
+        # Ensure clean Python types for YAML serialization (converts numpy int64 keys to standard int)
+        cluster_dict = {int(k): v for k, v in raw_cluster_dict.items()}
 
         # Save to clean human-readable YAML format
         with open(output_file, "w", encoding="utf-8") as f:
             yaml.dump(cluster_dict, f, default_flow_style=False)
 
-        print(f"[clustering] Done. {len(cluster_dict)} clusters found.")
+        print(f"[clustering] Done. {len(cluster_dict)} total clusters found across all sequences.")
         print(f"[clustering] Saved to {output_file}")
-
         return cluster_dict
     else:
         raise RuntimeError("Cannot continue without re-clustering")
