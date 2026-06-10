@@ -281,6 +281,7 @@ def cluster_sequences_mmseqs2(
     id_col: str = "id",
     output_file: str = "data/mmseqs2_cluster.yaml",
     seq_identity: float = 0.3,
+    force_recluster:float=False,
 ) -> dict:
     """Cluster sequences using MMseqs2 at a given sequence identity threshold."""
     
@@ -308,7 +309,10 @@ def cluster_sequences_mmseqs2(
     else:
         print(f"[clustering] {len(missing_ids)} IDs missing from cache. Re-clustering...")
 
-    accept_reclustering = input("Do you want to recluster? (This will update clusters for all old and new sequences) (y/n) : ")
+    if force_recluster:
+        accept_reclustering="y"
+    else:
+        accept_reclustering = input("Do you want to recluster? (This will update clusters for all old and new sequences) (y/n) : ")
     
     if accept_reclustering.lower() in ['y', 'yes']:
         os.makedirs(os.path.dirname(output_file), exist_ok=True)
