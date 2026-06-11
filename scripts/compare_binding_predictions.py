@@ -91,14 +91,16 @@ morf_ann = parse_annotation_file("data/MoRF_dataset/test.txt")
 lip_preds = {
     "AF-CALVADOS": parse_prediction_file("data/predictions/BindCORE_LIP_AF_CALVADOS_TE440_less_than_1024.csv"),
     "IDPFold2": parse_prediction_file("data/predictions/BindCORE_LIP_IDPFold2_TE440_less_than_1024.csv"),
-    "STARLING": parse_prediction_file("data/predictions/BindCORE_LIP_STARLING_TE440_less_than_380.csv")
+    "STARLING": parse_prediction_file("data/predictions/BindCORE_LIP_STARLING_TE440_less_than_380.csv"),
+    "CLIP": parse_prediction_file("data/predictions/CLIP_TE440.csv")
 }
 
 # MoRF Predictions
 morf_preds = {
     "AF-CALVADOS": parse_prediction_file("data/predictions/BindCORE_MoRF_AF_CALVADOS_test.csv"),
     "IDPFold2": parse_prediction_file("data/predictions/BindCORE_MoRF_IDPFold2_test.csv"),
-    "STARLING": parse_prediction_file("data/predictions/BindCORE_MoRF_STARLING_test_less_than_380.csv")
+    "STARLING": parse_prediction_file("data/predictions/BindCORE_MoRF_STARLING_test_less_than_380.csv"),
+    "MoRFchibi": parse_prediction_file("data/predictions/MoRFchibi_test.csv")
 }
 
 # ---------------------------------------------------------
@@ -173,7 +175,13 @@ print("Generating figures...")
 fig = plt.figure(figsize=(18, 12))
 gs = gridspec.GridSpec(2, 3, figure=fig, hspace=0.3, wspace=0.3)
 
-COLORS = {"AF-CALVADOS": "#e41a1c", "IDPFold2": "#377eb8", "STARLING": "#4daf4a"}
+COLORS = {
+    "AF-CALVADOS": "#e41a1c", 
+    "IDPFold2": "#377eb8", 
+    "STARLING": "#4daf4a",
+    "CLIP": "#984ea3",
+    "MoRFchibi": "#ff7f00"
+}
 
 # --- Panel A & B: Performance up to length k ---
 def plot_perf_length(ax, labels, scores, lengths, title):
