@@ -375,8 +375,8 @@ def make_figure(
         2, 1,
         figure=fig,
         height_ratios=[sum(hr) * 1.30, 3.6],
-        hspace=0.36,
-        left=0.03, right=0.97, top=0.935, bottom=0.05,
+        hspace=0.60,
+        left=0.03, right=0.97, top=0.88, bottom=0.05,
     )
 
     # ── Top row: LIP (a) and MoRF (b) bar panels ─────────────────────────────
@@ -410,13 +410,13 @@ def make_figure(
         # Panel letter + title in figure coordinates
         bb = top_gs[ci].get_position(fig)
         fig.text(
-            bb.x0 - 0.016, 0.958,
+            bb.x0 - 0.016, 0.93,
             PANEL_LETTER[task],
             fontsize=11, fontweight="bold",
             va="top", transform=fig.transFigure,
         )
         fig.text(
-            bb.x0 + 0.012, 0.958,
+            bb.x0 + 0.012, 0.93,
             TASK_TITLE[task],
             fontsize=8, fontweight="bold",
             va="top", color="#222222",
@@ -427,21 +427,21 @@ def make_figure(
     bot_gs = gridspec.GridSpecFromSubplotSpec(
         1, 4,
         subplot_spec=outer[1],
-        width_ratios=[0.45, 1, 1, 0.45],
-        wspace=0.14,
+        width_ratios=[0.15, 1, 1, 0.15],
+        wspace=0.60,
     )
 
     bb_bot = outer[1].get_position(fig)
     fig.text(
         bb_bot.x0 - 0.012,
-        bb_bot.y1 + 0.006,
+        bb_bot.y1 + 0.04,
         "c",
         fontsize=11, fontweight="bold",
         va="bottom", transform=fig.transFigure,
     )
     fig.text(
         bb_bot.x0 + 0.018,
-        bb_bot.y1 + 0.006,
+        bb_bot.y1 + 0.04,
         "Feature importance ranking consistency across ensemble generators",
         fontsize=8, fontweight="bold",
         va="bottom", color="#222222",
@@ -462,8 +462,8 @@ def make_figure(
         handles=handles,
         title="Ensemble generator",
         title_fontsize=6.5,
-        loc="upper right",
-        bbox_to_anchor=(0.988, 0.983),
+        loc="upper center",
+        bbox_to_anchor=(0.5, 0.995),
         fontsize=6.5,
         frameon=True,
         edgecolor="#CCCCCC",
@@ -471,7 +471,7 @@ def make_figure(
         borderpad=0.65,
         handlelength=1.2,
         handleheight=0.85,
-        ncol=1,
+        ncol=3,
     )
 
     return fig
