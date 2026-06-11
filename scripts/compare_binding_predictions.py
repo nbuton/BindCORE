@@ -309,7 +309,7 @@ def plot_positive_rate_by_length(ax, ann, title):
         mask = ann[pid]["mask"]
         lab = ann[pid]["labels"]
         lab_masked = lab[mask]
-        if len(lab_masked) == 0:
+        if len(lab_masked) == 0 or len(lab_masked) > 1024:
             continue
         lengths_arr.append(len(lab_masked))
         pos_rates.append(lab_masked.mean())
