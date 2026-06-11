@@ -40,6 +40,7 @@ import traceback
 from pathlib import Path
 
 import h5py
+from tqdm import tqdm
 import numpy as np
 import pandas as pd
 import torch
@@ -88,6 +89,7 @@ class _FeatureWrapper(nn.Module):
         model_shape: tuple,
         mask: torch.Tensor,
         known_mask: torch.Tensor,
+        debug: bool = False,
     ):
         super().__init__()
         self.model = model
@@ -96,6 +98,7 @@ class _FeatureWrapper(nn.Module):
         self.model_shape = model_shape  # shape to restore before model call
         self.mask = mask  # [1, L]
         self.known_mask = known_mask  # [1, L]
+        self.debug = debug
 
     def forward(self, x_flat: torch.Tensor) -> torch.Tensor:
         """
@@ -117,18 +120,19 @@ class _FeatureWrapper(nn.Module):
         kwargs["mask"] = mask_b
         kwargs[self.feature_key] = x_attr
 
-        # ── DEBUG ─────────────────────────────────────────────────────────
-        print(f"\n[DBG forward] feature_key={self.feature_key}  B={B}")
-        print(f"  x_flat.shape       = {x_flat.shape}")
-        print(
-            f"  x_attr.shape       = {x_attr.shape}  (after view to model_shape={self.model_shape})"
-        )
-        for k, v in kwargs.items():
-            if v is not None:
-                print(f"  kwargs[{k!r:<12}] = {tuple(v.shape)}")
-            else:
-                print(f"  kwargs[{k!r:<12}] = None")
-        # ─────────────────────────────────────────────────────────────────
+        if self.debug:
+            # ── DEBUG ─────────────────────────────────────────────────────────
+            print(f"\n[DBG forward] feature_key={self.feature_key}  B={B}")
+            print(f"  x_flat.shape       = {x_flat.shape}")
+            print(
+                f"  x_attr.shape       = {x_attr.shape}  (after view to model_shape={self.model_shape})"
+            )
+            for k, v in kwargs.items():
+                if v is not None:
+                    print(f"  kwargs[{k!r:<12}] = {tuple(v.shape)}")
+                else:
+                    print(f"  kwargs[{k!r:<12}] = None")
+            # ─────────────────────────────────────────────────────────────────
 
         logits = self.model(**kwargs)  # [B, L, 1] or [B, L]
         if logits.dim() == 3:
@@ -373,6 +377,8 @@ def compute_attributions(
     baseline_tensors: list[torch.Tensor],
     feature_key: str,
     device: torch.device,
+    baseline_batch_size: int = 5,
+    debug: bool = False,
 ) -> dict:
     """
     Run DeepLiftShap for one protein and one feature group.
@@ -405,13 +411,14 @@ def compute_attributions(
     is_pairwise = feat_ndim == 3  # x_pairwise [C, L, L]
     is_local = feat_ndim == 2  # x_local    [F, L]
 
-    print(f"\n[DBG compute] pid={sample['protein_id']}  feature_key={feature_key}")
-    print(
-        f"  raw_feat.shape = {raw_feat.shape}  is_global={is_global}  is_local={is_local}  is_pairwise={is_pairwise}"
-    )
-    print(
-        f"  n_baselines    = {len(baseline_tensors)}  baseline[0].shape = {baseline_tensors[0].shape}"
-    )
+    if debug:
+        print(f"\n[DBG compute] pid={sample['protein_id']}  feature_key={feature_key}")
+        print(
+            f"  raw_feat.shape = {raw_feat.shape}  is_global={is_global}  is_local={is_local}  is_pairwise={is_pairwise}"
+        )
+        print(
+            f"  n_baselines    = {len(baseline_tensors)}  baseline[0].shape = {baseline_tensors[0].shape}"
+        )
 
     # ── Pad input + baselines to the same sequence length ─────────────────
     # global: no seq dim → seq_dim=-1 (just stack)
@@ -437,20 +444,22 @@ def compute_attributions(
     model_shape = tuple(all_feats.shape[1:])
     D = int(torch.tensor(list(model_shape)).prod().item())
 
-    print(f"  all_feats.shape = {all_feats.shape}")
-    print(
-        f"  model_shape={model_shape}  D={D}  L_input={L_input}  L_max={L_max}  pad_len={pad_len}"
-    )
+    if debug:
+        print(f"  all_feats.shape = {all_feats.shape}")
+        print(
+            f"  model_shape={model_shape}  D={D}  L_input={L_input}  L_max={L_max}  pad_len={pad_len}"
+        )
 
     # Flatten to [N, D] — Captum only sees 2-D input, so dim 0 is always batch
     input_flat = all_feats[[0]].reshape(1, D).to(device).requires_grad_(True)
     baseline_flat = all_feats[1:].reshape(-1, D).to(device)
 
-    print(f"  input_flat.shape    = {input_flat.shape}")
-    print(f"  baseline_flat.shape = {baseline_flat.shape}")
+    if debug:
+        print(f"  input_flat.shape    = {input_flat.shape}")
+        print(f"  baseline_flat.shape = {baseline_flat.shape}")
 
-    # Also print fixed inputs that will go into the wrapper
-    print(f"  fixed keys (before del): tokens, x_scalar, x_local, x_pairwise, plm_pad")
+        # Also print fixed inputs that will go into the wrapper
+        print(f"  fixed keys (before del): tokens, x_scalar, x_local, x_pairwise, plm_pad")
 
     # ── Pad masks ─────────────────────────────────────────────────────────
     orig_mask = sample["mask"]  # [1, L_true]
@@ -510,11 +519,12 @@ def compute_attributions(
     }
     del fixed[feature_key]  # injected as x_flat via wrapper
 
-    print(f"  fixed shapes after del '{feature_key}':")
-    for k, v in fixed.items():
-        print(f"    fixed[{k!r:<12}] = {tuple(v.shape) if v is not None else None}")
-    print(f"  mask_padded.shape  = {mask_padded.shape}")
-    print(f"  known_padded.shape = {known_padded.shape}")
+    if debug:
+        print(f"  fixed shapes after del '{feature_key}':")
+        for k, v in fixed.items():
+            print(f"    fixed[{k!r:<12}] = {tuple(v.shape) if v is not None else None}")
+        print(f"  mask_padded.shape  = {mask_padded.shape}")
+        print(f"  known_padded.shape = {known_padded.shape}")
 
     wrapper = _FeatureWrapper(
         model=model,
@@ -523,13 +533,31 @@ def compute_attributions(
         model_shape=model_shape,  # wrapper calls .view(B, *model_shape)
         mask=mask_padded,
         known_mask=known_padded,
+        debug=debug,
     )
 
     dl_shap = DeepLiftShap(wrapper)
-    attrs_flat = dl_shap.attribute(
-        inputs=input_flat,  # [1, D]
-        baselines=baseline_flat,  # [n_bl, D]
-    )
+    
+    all_attrs = []
+    n_bl = baseline_flat.shape[0]
+    
+    try:
+        for i in range(0, n_bl, baseline_batch_size):
+            b_batch = baseline_flat[i : i + baseline_batch_size]
+            a_batch = dl_shap.attribute(
+                inputs=input_flat,
+                baselines=b_batch,
+            )
+            all_attrs.append(a_batch * b_batch.shape[0])
+            
+        attrs_flat = torch.cat(all_attrs, dim=0).sum(dim=0, keepdim=True) / n_bl
+    except RuntimeError as exc:
+        if "not have been used in the graph" in str(exc):
+            if debug:
+                print(f"[DBG compute] {feature_key} unused in graph. Returning zeros.")
+            attrs_flat = torch.zeros_like(input_flat)
+        else:
+            raise
     # attrs_flat: [1, D]
 
     # ── Unflatten and aggregate ───────────────────────────────────────────
@@ -582,6 +610,8 @@ def dataset_attribution(
     checkpoint: dict,
     device: torch.device,
     min_known_residues: int = 5,
+    baseline_batch_size: int = 5,
+    debug: bool = False,
 ) -> pd.DataFrame:
     """
     Run attribution for every protein x every feature group.
@@ -602,28 +632,27 @@ def dataset_attribution(
         importances: list[torch.Tensor] = []
         skipped = 0
 
-        for i, sample in enumerate(samples):
+        pbar = tqdm(samples, desc=f"Attributing '{fkey}'", unit="prot")
+        for i, sample in enumerate(pbar):
             pid = sample["protein_id"]
             n_known = int(sample["known_mask"].sum())
             n_total = int(sample["mask"].sum())
 
             is_global = sample[fkey].squeeze(0).dim() == 1
             if not is_global and n_known < min_known_residues:
-                print(
-                    f"  [{i+1:>3}/{len(samples)}] {pid}: skipped "
-                    f"({n_known} known residues < {min_known_residues})"
-                )
+                if debug:
+                    tqdm.write(
+                        f"  [{i+1:>3}/{len(samples)}] {pid}: skipped "
+                        f"({n_known} known residues < {min_known_residues})"
+                    )
                 skipped += 1
                 continue
 
-            print(
-                f"  [{i+1:>3}/{len(samples)}] {pid} " f"(L={n_total}, known={n_known})",
-                end=" ... ",
-                flush=True,
-            )
+            if debug:
+                tqdm.write(f"  [{i+1:>3}/{len(samples)}] {pid} (L={n_total}, known={n_known}) ... ", end="")
 
             try:
-                result = compute_attributions(model, sample, baselines, fkey, device)
+                result = compute_attributions(model, sample, baselines, fkey, device, baseline_batch_size=baseline_batch_size, debug=debug)
                 imp = result["feature_importance"]
 
                 if imp.dim() != 1:
@@ -632,11 +661,20 @@ def dataset_attribution(
                     )
 
                 importances.append(imp)
-                print(f"ok  (shape={imp.shape})")
+                if debug:
+                    tqdm.write(f"ok  (shape={imp.shape})")
 
             except Exception as exc:
-                print(f"WARN — skipped: {exc}")
-                traceback.print_exc()
+                err_str = str(exc).lower()
+                if "out of memory" in err_str or "oom" in err_str:
+                    tqdm.write(f"\n[FATAL ERROR] Out of memory! Aborting.")
+                    raise
+                if not isinstance(exc, (ValueError, KeyError, IndexError, TypeError)):
+                    tqdm.write(f"\n[FATAL ERROR] Unexpected major error: {exc}")
+                    raise
+                if debug:
+                    tqdm.write(f"WARN — skipped: {exc}")
+                    traceback.print_exc()
                 skipped += 1
 
         print(f"  -> {len(importances)} proteins attributed, {skipped} skipped.")
@@ -724,6 +762,12 @@ def main() -> None:
         help="Number of baseline sequences for DeepLiftShap",
     )
     parser.add_argument(
+        "--baseline_batch_size",
+        type=int,
+        default=2,
+        help="Process baselines in chunks to save VRAM",
+    )
+    parser.add_argument(
         "--strategy",
         default="sample",
         choices=["sample", "zeros", "mean"],
@@ -736,7 +780,7 @@ def main() -> None:
     parser.add_argument(
         "--features",
         nargs="+",
-        default=["x_scalar", "x_local"],
+        default=["x_scalar", "x_local", "x_pairwise"],
         choices=["x_scalar", "x_local", "x_pairwise"],
         help="Feature groups to attribute (pairwise is memory-intensive)",
     )
@@ -765,7 +809,13 @@ def main() -> None:
             "prepare_data so all arrays stay aligned."
         ),
     )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Print verbose debug information",
+    )
     args = parser.parse_args()
+
 
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
@@ -799,6 +849,8 @@ def main() -> None:
         checkpoint=checkpoint,
         device=device,
         min_known_residues=args.min_known,
+        baseline_batch_size=args.baseline_batch_size,
+        debug=args.debug,
     )
 
     Path(args.output).parent.mkdir(parents=True, exist_ok=True)

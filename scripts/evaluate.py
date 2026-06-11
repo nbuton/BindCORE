@@ -234,14 +234,14 @@ def main():
     plot_roc_curves(
         test_records,
         model_names,
-        title="ROC Curves - LIP Test Set (residue level)",
+        title="ROC Curves",
         save_path=output_dir / "roc_curves.pdf",
     )
     plt.savefig("data/ROC_curve.png")
     plot_pr_curves(
         test_records,
         model_names,
-        title="Precision-Recall Curves - LIP Test Set (residue level)",
+        title="Precision-Recall Curves",
         save_path=output_dir / "pr_curves.pdf",
     )
     plt.savefig("data/Precision_Recall_curve.png")

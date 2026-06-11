@@ -24,7 +24,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from scipy import stats
 
-from bindcore.utils import read_protein_data
+from bindcore.data.io import read_protein_data
 
 # ---------------------------------------------------------------------------
 # Feature groups
@@ -116,9 +116,15 @@ def load_feature_data(
         for _, row in df.iterrows():
             pid = row["protein_id"]
             logging.debug(f"PID:{pid}")
+
+            annotations = row["LIP_annotations"]
+            valid_mask = np.array([c != "-" for c in annotations])
+            labels = np.array([int(c) for c, v in zip(annotations, valid_mask) if v])
+
             local_feats = np.stack(
                 [h5_data[pid][f][()] for f in local_features], axis=0
-            )
+            )[:, valid_mask]
+
             if pairwise_features:
                 pairwise_feats = np.stack(
                     [
@@ -126,30 +132,25 @@ def load_feature_data(
                         for f in pairwise_features
                     ],
                     axis=0,
-                )
+                )[:, valid_mask]
                 all_feats = np.concatenate((local_feats, pairwise_feats), axis=0)
             else:
                 all_feats = local_feats
 
-            labels = np.array([int(c) for c in row["LIP_annotations"]])
             X_features.append(all_feats)
             y_list.append(labels)
 
     return X_features, y_list
 
 
-def build_plot_data(
-    x_list: list,
-    y_list: list,
-    features: list[str],
-) -> dict:
-    plot_data = {feat: {"LIP": [], "NON_LIP": []} for feat in features}
+def build_plot_data(x_list, y_list, features):
+    plot_data = {feat: {"binding": [], "non_binding": []} for feat in features}
     for feats, mask in zip(x_list, y_list):
-        is_lip = mask.astype(bool)
+        is_binding = mask.astype(bool)
         for i, feat in enumerate(features):
             vals = feats[i]
-            plot_data[feat]["LIP"].extend(vals[is_lip])
-            plot_data[feat]["NON_LIP"].extend(vals[~is_lip])
+            plot_data[feat]["binding"].extend(vals[is_binding])
+            plot_data[feat]["non_binding"].extend(vals[~is_binding])
     return plot_data
 
 
@@ -304,7 +305,7 @@ def violin_subplot(
     ax.tick_params(axis="y", which="both", length=2, width=0.6)
 
 
-def make_figure(data: dict, output_path: str, ncols: int = 4) -> None:
+def make_figure(data: dict, output_path: str,binding_type:str, ncols: int = 4) -> None:
     props = list(data.keys())
     n = len(props)
     ncols = min(ncols, n)
@@ -318,8 +319,8 @@ def make_figure(data: dict, output_path: str, ncols: int = 4) -> None:
     axes_flat = np.array(axes).flatten()
 
     for ax, prop in zip(axes_flat, props):
-        g1 = np.asarray(data[prop]["NON_LIP"], dtype=float)
-        g2 = np.asarray(data[prop]["LIP"], dtype=float)
+        g1 = np.asarray(data[prop]["non_binding"], dtype=float)
+        g2 = np.asarray(data[prop]["binding"], dtype=float)
         g1, g2 = g1[~np.isnan(g1)], g2[~np.isnan(g2)]
         if not len(g1) and not len(g2):
             ax.text(
@@ -334,7 +335,7 @@ def make_figure(data: dict, output_path: str, ncols: int = 4) -> None:
             )
             continue
         violin_subplot(
-            ax, g1, g2, "Non-LIP", "LIP", PALETTE["teal"], PALETTE["orange"], prop
+            ax, g1, g2, "Non-"+binding_type, binding_type, PALETTE["teal"], PALETTE["orange"], prop
         )
 
     for ax in axes_flat[n:]:
@@ -352,18 +353,19 @@ def make_figure(data: dict, output_path: str, ncols: int = 4) -> None:
 
 def main():
     parser = argparse.ArgumentParser(description="Visualise feature distributions.")
-    parser.add_argument("--dataset", default="data/CLIP_dataset/TR1000_max_1024.txt")
-    parser.add_argument("--h5", default="data/protein_MD_properties.h5")
+    parser.add_argument("--dataset", default="data/LIP_dataset/TR1000_less_than_1024.txt")
+    parser.add_argument("--h5", default="data/properties/IDPFold2_derived_properties.h5")
+    parser.add_argument("--binding_type", help="Can be LIP or MoRF")
     parser.add_argument("--ncols", type=int, default=4)
     args = parser.parse_args()
 
     dataset_stem = Path(args.dataset).stem
     h5_stem = Path(args.h5).stem
-    output_peth_violin = (
+    output_path_violin = (
         f"results/{dataset_stem}_{h5_stem}_feature_comparison_violin.pdf"
     )
 
-    Path(args.output).parent.mkdir(parents=True, exist_ok=True)
+    Path(output_path_violin).parent.mkdir(parents=True, exist_ok=True)
 
     print("Loading data …")
     x_list, y_list = load_feature_data(
@@ -377,7 +379,7 @@ def main():
     plot_data = build_plot_data(x_list, y_list, ALL_FEATURES)
 
     print("Generating figure …")
-    make_figure(plot_data, output_peth_violin, ncols=args.ncols)
+    make_figure(plot_data, output_path_violin, args.binding_type, ncols=args.ncols)
 
 
 if __name__ == "__main__":
