@@ -11,6 +11,8 @@ Subfigures:
   D) Calibration (Reliability Diagram) for MoRF
   E) Agreement (Pearson correlation) between models for LIP
   F) Agreement (Pearson correlation) between models for MoRF
+  G) Positive rate (binding residue fraction) vs protein length for LIP
+  H) Positive rate (binding residue fraction) vs protein length for MoRF
 """
 
 import os
@@ -22,6 +24,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
+from matplotlib.lines import Line2D
 import seaborn as sns
 from scipy.stats import pearsonr
 from sklearn.metrics import average_precision_score
@@ -59,12 +62,14 @@ def parse_annotation_file(path: str) -> dict:
     _flush(current_id, current_seq, current_lab)
     return data
 
-def parse_prediction_file(path: str) -> dict:
+def parse_prediction_file(path: str, max_len: int = None) -> dict:
     df = pd.read_csv(path)
     data = {}
     for _, row in df.iterrows():
         pid = str(row["protein_id"])
         scores = np.array([float(x) for x in str(row["predictions"]).split(",")])
+        if max_len is not None and len(scores) > max_len:
+            continue
         data[pid] = {"scores": scores}
     return data
 
@@ -92,7 +97,7 @@ lip_preds = {
     "AF-CALVADOS": parse_prediction_file("data/predictions/BindCORE_LIP_AF_CALVADOS_TE440_less_than_1024.csv"),
     "IDPFold2": parse_prediction_file("data/predictions/BindCORE_LIP_IDPFold2_TE440_less_than_1024.csv"),
     "STARLING": parse_prediction_file("data/predictions/BindCORE_LIP_STARLING_TE440_less_than_380.csv"),
-    "CLIP": parse_prediction_file("data/predictions/CLIP_TE440.csv")
+    "CLIP": parse_prediction_file("data/predictions/CLIP_TE440.csv", max_len=1024)
 }
 
 # MoRF Predictions
@@ -172,8 +177,8 @@ morf_labels, morf_scores, morf_lengths = prepare_dataset(morf_ann, morf_preds)
 # FIGURE GENERATION
 # ---------------------------------------------------------
 print("Generating figures...")
-fig = plt.figure(figsize=(18, 12))
-gs = gridspec.GridSpec(2, 3, figure=fig, hspace=0.3, wspace=0.3)
+fig = plt.figure(figsize=(24, 12))
+gs = gridspec.GridSpec(2, 4, figure=fig, hspace=0.35, wspace=0.32)
 
 COLORS = {
     "AF-CALVADOS": "#e41a1c", 
@@ -214,7 +219,11 @@ def plot_perf_length(ax, labels, scores, lengths, title):
     ax.set_title(title, fontweight="bold")
     ax.set_xlabel("Max protein length (k)")
     ax.set_ylabel("AUPRC (up to length k)")
-    ax.legend(loc="lower right")
+    
+    # Unified legend for all models
+    handles = [Line2D([0], [0], color=COLORS[m], lw=2, marker='o', label=m) for m in COLORS.keys()]
+    ax.legend(handles=handles, loc="lower right")
+    ax.tick_params(axis='x', rotation=45)
     ax.grid(True, ls="--", alpha=0.5)
 
 plot_perf_length(fig.add_subplot(gs[0, 0]), lip_labels, lip_scores, lip_lengths, "A. LIP Performance by Length")
@@ -250,7 +259,12 @@ def plot_calibration(ax, labels, scores, title):
     ax.set_title(title, fontweight="bold")
     ax.set_xlabel("Predicted score (Rank Normalized)")
     ax.set_ylabel("Fraction of positives")
-    ax.legend(loc="upper left")
+    
+    # Unified legend for all models + perfect calibration line
+    handles = [Line2D([0], [0], color=COLORS[m], lw=2, marker='s', label=m) for m in COLORS.keys()]
+    handles.append(Line2D([0], [0], color="k", linestyle="--", lw=1, label="Perfect calibration"))
+    ax.legend(handles=handles, loc="upper left")
+    ax.tick_params(axis='x', rotation=45)
     ax.grid(True, ls="--", alpha=0.5)
 
 plot_calibration(fig.add_subplot(gs[0, 1]), lip_labels, lip_scores, "C. LIP Calibration")
@@ -283,6 +297,61 @@ def plot_agreement(ax, labels, scores, title):
 
 plot_agreement(fig.add_subplot(gs[0, 2]), lip_labels, lip_scores, "E. LIP Model Agreement (Pearson r)")
 plot_agreement(fig.add_subplot(gs[1, 2]), morf_labels, morf_scores, "F. MoRF Model Agreement (Pearson r)")
+
+
+# --- Panel G & H: Positive rate vs protein length ---
+def plot_positive_rate_by_length(ax, ann, title):
+    """Scatter + running mean of binding residue fraction vs protein length."""
+    pids = list(ann.keys())
+    lengths_arr = []
+    pos_rates = []
+    for pid in pids:
+        mask = ann[pid]["mask"]
+        lab = ann[pid]["labels"]
+        lab_masked = lab[mask]
+        if len(lab_masked) == 0:
+            continue
+        lengths_arr.append(len(lab_masked))
+        pos_rates.append(lab_masked.mean())
+
+    lengths_arr = np.array(lengths_arr)
+    pos_rates = np.array(pos_rates)
+
+    # Scatter of individual proteins
+    ax.scatter(lengths_arr, pos_rates, alpha=0.3, s=8, color="#888888", zorder=1)
+
+    # Binned running mean ± std
+    bin_edges = np.percentile(lengths_arr, np.linspace(0, 100, 21))
+    bin_edges = np.unique(bin_edges.astype(int))
+    bin_centers, bin_means, bin_stds = [], [], []
+    for lo, hi in zip(bin_edges[:-1], bin_edges[1:]):
+        sel = (lengths_arr >= lo) & (lengths_arr < hi)
+        if sel.sum() < 3:
+            continue
+        bin_centers.append((lo + hi) / 2)
+        bin_means.append(pos_rates[sel].mean())
+        bin_stds.append(pos_rates[sel].std())
+
+    bin_centers = np.array(bin_centers)
+    bin_means = np.array(bin_means)
+    bin_stds = np.array(bin_stds)
+
+    ax.plot(bin_centers, bin_means, color="#1a1a2e", lw=2.5, zorder=3, label="Binned mean")
+    ax.fill_between(bin_centers,
+                    np.clip(bin_means - bin_stds, 0, 1),
+                    np.clip(bin_means + bin_stds, 0, 1),
+                    alpha=0.25, color="#1a1a2e", zorder=2, label="±1 std")
+
+    ax.set_title(title, fontweight="bold")
+    ax.set_xlabel("Protein length (residues)")
+    ax.set_ylabel("Positive rate (binding fraction)")
+    ax.set_ylim(0, 1)
+    ax.legend(loc="upper right")
+    ax.tick_params(axis='x', rotation=45)
+    ax.grid(True, ls="--", alpha=0.5)
+
+plot_positive_rate_by_length(fig.add_subplot(gs[0, 3]), lip_ann, "G. LIP Positive Rate by Length")
+plot_positive_rate_by_length(fig.add_subplot(gs[1, 3]), morf_ann, "H. MoRF Positive Rate by Length")
 
 plt.tight_layout()
 out_path = "figures/nature_method_comparison_figure.pdf"
