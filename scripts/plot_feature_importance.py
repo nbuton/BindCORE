@@ -425,10 +425,10 @@ def make_figure(
 
     # ── Bottom row: Spearman rank-correlation heatmaps (c) ───────────────────
     bot_gs = gridspec.GridSpecFromSubplotSpec(
-        1, 4,
+        1, 5,
         subplot_spec=outer[1],
-        width_ratios=[0.15, 1, 1, 0.15],
-        wspace=0.60,
+        width_ratios=[0.05, 1, 0.45, 1, 0.05],
+        wspace=0.0,
     )
 
     bb_bot = outer[1].get_position(fig)
@@ -449,7 +449,7 @@ def make_figure(
     )
 
     for ci, task in enumerate(TASKS):
-        ax_s = fig.add_subplot(bot_gs[ci + 1])
+        ax_s = fig.add_subplot(bot_gs[ci * 2 + 1])
         mat, labels = spearman_matrix(data, task)
         _draw_spearman(ax_s, mat, labels, task)
 
