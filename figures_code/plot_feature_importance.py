@@ -3,26 +3,7 @@
 scripts/plot_feature_importance.py
 ====================================
 Publication-quality interpretability summary figure for BindCORE.
-
-Reads DeepLIFT-SHAP feature_importance.csv files from:
-    data/interpretability/BindCORE_{LIP|MoRF}_{AF_CALVADOS|IDPFold2|STARLING}/
-
-Panels
-------
-a / b  Top-ranked features per group (global scalar, per-residue local,
-       pairwise) for LIP (a) and MoRF (b). Horizontal bars = mean
-       |DeepLIFT-SHAP| attribution ± s.d. across proteins, colour-coded
-       by ensemble generator. Features ranked by mean importance across
-       all three generators.
-
-c      Spearman rank-correlation between ensemble generators for the
-       complete feature importance ranking (all groups pooled), shown as
-       annotated heatmaps for LIP (left) and MoRF (right).
-
-Output
-------
-figures/figure_interpretability.pdf
-figures/figure_interpretability.png  (300 dpi)
+Styled to match the benchmark performance plots.
 """
 
 from __future__ import annotations
@@ -39,41 +20,49 @@ import matplotlib.ticker as ticker
 from matplotlib.patches import Patch
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 from scipy import stats
+import seaborn as sns
 
 warnings.filterwarnings("ignore")
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Matplotlib / typography style  (Nature Methods: min 5 pt, sans-serif)
+# Matplotlib / typography style
 # ──────────────────────────────────────────────────────────────────────────────
-mpl.rcParams.update({
-    "font.family":           "sans-serif",
-    "font.sans-serif":       ["Helvetica Neue", "Helvetica", "Arial", "DejaVu Sans"],
-    "font.size":             7,
-    "axes.labelsize":        7,
-    "axes.titlesize":        7,
-    "xtick.labelsize":       5.5,
-    "ytick.labelsize":       6,
-    "legend.fontsize":       6.5,
-    "legend.title_fontsize": 7,
-    "figure.dpi":            300,
-    "pdf.fonttype":          42,   # embeds fonts as Type 1 (required by journals)
-    "ps.fonttype":           42,
-    "axes.linewidth":        0.7,
-    "xtick.major.width":     0.7,
-    "ytick.major.width":     0.7,
-    "xtick.major.size":      2.5,
-    "ytick.major.size":      2.5,
-    "xtick.minor.width":     0.5,
-    "ytick.minor.width":     0.5,
-})
+sns.set_style("ticks")
+
+def set_nature_style():
+    mpl.rcParams.update({
+        "font.family": "sans-serif",
+        "font.sans-serif": ["Arial", "Helvetica", "DejaVu Sans"],
+        "font.size": 20,
+        "axes.titlesize": 20,
+        "axes.labelsize": 20,
+        "xtick.labelsize": 18,
+        "ytick.labelsize": 18,
+        "legend.fontsize": 20,
+        "axes.linewidth": 0.8,
+        "lines.linewidth": 1.2,
+        "axes.spines.top": False,
+        "axes.spines.right": False,
+        "figure.dpi": 300,
+        "pdf.fonttype": 42,
+        "ps.fonttype": 42,
+        "xtick.major.width": 0.7,
+        "ytick.major.width": 0.7,
+        "xtick.major.size": 3.0,
+        "ytick.major.size": 3.0,
+        "xtick.minor.width": 0.5,
+        "ytick.minor.width": 0.5,
+    })
+
+set_nature_style()
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Colour palette  (NPG / Nature Publishing Group)
 # ──────────────────────────────────────────────────────────────────────────────
 ENSEMBLE_COLORS: dict[str, str] = {
-    "AF-CALVADOS": "#3C5488",   # dark blue
-    "IDPFold2":    "#00A087",   # teal-green
-    "STARLING":    "#E64B35",   # red-orange
+    "AF_CALVADOS": "#3C5488",  
+    "IDPFold2":    "#00A087",   
+    "STARLING":    "#E64B35",   
 }
 
 GROUP_BG: dict[str, str] = {
@@ -162,10 +151,11 @@ BASE_DIR  = "data/interpretability"
 TASKS     = ["LIP", "MoRF"]
 ENSEMBLES = ["AF_CALVADOS", "IDPFold2", "STARLING"]
 ENS_DISPLAY: dict[str, str] = {
-    "AF_CALVADOS": "AF-CALVADOS",
-    "IDPFold2":    "IDPFold2",
-    "STARLING":    "STARLING",
+    "AF_CALVADOS": r"$\mathbf{BC_{AFCAV}}$",
+    "IDPFold2":    r"$\mathbf{BC_{IDPF2}}$", 
+    "STARLING":    r"$\mathbf{BC_{STA}}$",
 }
+
 GROUPS = ["x_scalar", "x_local", "x_pairwise"]
 TOP_N: dict[str, int] = {"x_scalar": 10, "x_local": 8, "x_pairwise": 3}
 
@@ -225,7 +215,6 @@ def spearman_matrix(
                 v1 = [vecs[e1][f] for f in common]
                 v2 = [vecs[e2][f] for f in common]
                 res = stats.spearmanr(v1, v2)
-                # scipy ≥ 1.9 returns SpearmanrResult; earlier returns tuple
                 mat[i, j] = res.statistic if hasattr(res, "statistic") else res[0]
 
     return mat, [ENS_DISPLAY[e] for e in ENSEMBLES]
@@ -274,7 +263,7 @@ def _draw_bar_panel(
             means,
             bw,
             xerr=stds,
-            color=ENSEMBLE_COLORS[lbl],
+            color=ENSEMBLE_COLORS[ens],
             alpha=0.88,
             label=lbl,
             linewidth=0,
@@ -288,23 +277,23 @@ def _draw_bar_panel(
         )
 
     ax.set_yticks(yp)
-    ax.set_yticklabels([_fmt(fn) for fn in feat_names], fontsize=6.0)
+    ax.set_yticklabels([_fmt(fn) for fn in feat_names], fontsize=15)
     ax.invert_yaxis()
 
     # Spine cleanup
     for spine in ("top", "right", "left"):
         ax.spines[spine].set_visible(False)
     ax.tick_params(axis="y", length=0, pad=2)
-    ax.tick_params(axis="x", labelsize=5.5)
+    ax.tick_params(axis="x", labelsize=10)
 
     # Group title
     ax.set_title(
         GROUP_LABELS[grp],
-        fontsize=6.5,
+        fontsize=24,
         fontweight="bold",
         color=GROUP_TITLE_COLOR[grp],
         loc="left",
-        pad=2,
+        pad=4,
     )
 
     # X axis: scientific notation, dotted grid
@@ -316,7 +305,7 @@ def _draw_bar_panel(
     ax.set_axisbelow(True)
 
     if show_xlabel:
-        ax.set_xlabel("Mean |SHAP attribution|", fontsize=6.5, labelpad=3)
+        ax.set_xlabel("Mean |SHAP attribution|", fontsize=20, labelpad=5)
 
 
 def _draw_spearman(
@@ -329,9 +318,9 @@ def _draw_spearman(
     im = ax.imshow(mat, vmin=0.5, vmax=1.0, cmap="Blues", aspect="auto")
 
     ax.set_xticks(range(3))
-    ax.set_xticklabels(labels, fontsize=6, rotation=35, ha="right")
+    ax.set_xticklabels(labels, fontsize=18, rotation=35, ha="right")
     ax.set_yticks(range(3))
-    ax.set_yticklabels(labels, fontsize=6)
+    ax.set_yticklabels(labels, fontsize=18)
     ax.tick_params(length=0, pad=2)
 
     for i in range(3):
@@ -342,17 +331,17 @@ def _draw_spearman(
                 j, i,
                 f"{mat[i, j]:.2f}",
                 ha="center", va="center",
-                fontsize=6.5, color=text_color, fontweight=fw,
+                fontsize=10, color=text_color, fontweight=fw,
             )
 
-    ax.set_title(title, fontsize=7, fontweight="bold", pad=4, color="#333333")
+    ax.set_title(title, fontsize=16, fontweight="bold", pad=6, color="#333333")
 
     # Inset colourbar
     div = make_axes_locatable(ax)
     cax = div.append_axes("right", size="7%", pad=0.05)
     cb  = plt.colorbar(im, cax=cax)
-    cb.ax.tick_params(labelsize=5.5)
-    cb.set_label("ρ (Spearman)", fontsize=6, labelpad=2)
+    cb.ax.tick_params(labelsize=10)
+    cb.set_label("ρ (Spearman)", fontsize=24, labelpad=4)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -367,15 +356,15 @@ def make_figure(
     # Height ratios proportional to number of feature rows per group
     hr = [TOP_N["x_scalar"], TOP_N["x_local"], TOP_N["x_pairwise"]]
 
-    # Figure: 183 mm wide (Nature Methods double column)
-    fig = plt.figure(figsize=(183 / 25.4, 215 / 25.4))
+    # Figure: Scaled up to match 14 inch canvas
+    fig = plt.figure(figsize=(14.4, 16.9))
 
     # ── Outer grid: [bar panels row] / [Spearman row] ────────────────────────
     outer = gridspec.GridSpec(
         2, 1,
         figure=fig,
-        height_ratios=[sum(hr) * 1.30, 3.6],
-        hspace=0.60,
+        height_ratios=[sum(hr) * 0.8, 3.6],
+        hspace=0.30,
         left=0.03, right=0.97, top=0.88, bottom=0.05,
     )
 
@@ -387,8 +376,8 @@ def make_figure(
     )
 
     TASK_TITLE = {
-        "LIP":  "LIP — linear interacting peptides",
-        "MoRF": "MoRF — molecular recognition features",
+        "LIP":  "LIP",
+        "MoRF": "MoRF",
     }
     PANEL_LETTER = {"LIP": "a", "MoRF": "b"}
 
@@ -410,15 +399,15 @@ def make_figure(
         # Panel letter + title in figure coordinates
         bb = top_gs[ci].get_position(fig)
         fig.text(
-            bb.x0 - 0.016, 0.93,
+            bb.x0 - 0.18, 0.93,
             PANEL_LETTER[task],
-            fontsize=11, fontweight="bold",
+            fontsize=25, fontweight="bold",
             va="top", transform=fig.transFigure,
         )
         fig.text(
-            bb.x0 + 0.012, 0.93,
+            bb.x0 - 0.001, 0.93,
             TASK_TITLE[task],
-            fontsize=8, fontweight="bold",
+            fontsize=25, fontweight="bold",
             va="top", color="#222222",
             transform=fig.transFigure,
         )
@@ -427,23 +416,23 @@ def make_figure(
     bot_gs = gridspec.GridSpecFromSubplotSpec(
         1, 5,
         subplot_spec=outer[1],
-        width_ratios=[0.05, 1, 0.45, 1, 0.05],
+        width_ratios=[0.05, 1, 0.8, 1, 0.5],
         wspace=0.0,
     )
 
     bb_bot = outer[1].get_position(fig)
     fig.text(
-        bb_bot.x0 - 0.012,
+        bb_bot.x0 - 0.18,
         bb_bot.y1 + 0.04,
         "c",
-        fontsize=11, fontweight="bold",
+        fontsize=25, fontweight="bold",
         va="bottom", transform=fig.transFigure,
     )
     fig.text(
-        bb_bot.x0 + 0.018,
+        bb_bot.x0 - 0.001,
         bb_bot.y1 + 0.04,
-        "Feature importance ranking consistency across ensemble generators",
-        fontsize=8, fontweight="bold",
+        "Feature ranking consistency",
+        fontsize=25, fontweight="bold",
         va="bottom", color="#222222",
         transform=fig.transFigure,
     )
@@ -453,18 +442,19 @@ def make_figure(
         mat, labels = spearman_matrix(data, task)
         _draw_spearman(ax_s, mat, labels, task)
 
+
     # ── Shared legend for ensemble colours ───────────────────────────────────
     handles = [
-        Patch(facecolor=ENSEMBLE_COLORS[ENS_DISPLAY[e]], label=ENS_DISPLAY[e])
+        Patch(facecolor=ENSEMBLE_COLORS[e], label=ENS_DISPLAY[e])
         for e in ENSEMBLES
     ]
     fig.legend(
         handles=handles,
-        title="Ensemble generator",
-        title_fontsize=6.5,
+        title="Model flavour",
+        title_fontsize=13,
         loc="upper center",
-        bbox_to_anchor=(0.5, 0.995),
-        fontsize=6.5,
+        bbox_to_anchor=(0.42, 0.995),
+        fontsize=18,
         frameon=True,
         edgecolor="#CCCCCC",
         facecolor="white",

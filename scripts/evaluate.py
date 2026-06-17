@@ -231,26 +231,43 @@ def main():
     # ── Figures ────────────────────────────────────────────────────────────
     model_names = [r["model"] for r in all_results]
 
+    truth_path_lower = args.test_truth.lower()
+    dataset_tag = ""
+    if "lip" in truth_path_lower:
+        dataset_tag = "LIP"
+    elif "morf" in truth_path_lower:
+        dataset_tag = "MoRF"
+        
+    # 2. Determine length criteria
+    len_tag = ""
+    if "less_than_1024" in truth_path_lower:
+        len_tag = "less_than_1024"
+    elif "less_than_380" in truth_path_lower:
+        len_tag = "less_than_380"
+    elif "max_1024" in truth_path_lower:
+        len_tag = "max_1024"
+
+    # 3. Combine components into a valid prefix
+    prefix_components = [comp for comp in [dataset_tag, len_tag] if comp]
+    file_prefix = "_".join(prefix_components) + "_" if prefix_components else ""
+
     plot_roc_curves(
         test_records,
         model_names,
         title="ROC Curves",
-        save_path=output_dir / "roc_curves.pdf",
+        save_path=output_dir / f"{file_prefix}roc_curves.pdf",
     )
-    plt.savefig("data/ROC_curve.png")
     plot_pr_curves(
         test_records,
         model_names,
         title="Precision-Recall Curves",
-        save_path=output_dir / "pr_curves.pdf",
+        save_path=output_dir / f"{file_prefix}pr_curves.pdf",
     )
-    plt.savefig("data/Precision_Recall_curve.png")
     plot_metrics_bar(
         all_results,
         title="Model Performance - LIP Test Set (residue level)",
-        save_path=output_dir / "metrics_bar.pdf",
+        save_path=output_dir / f"{file_prefix}metrics_bar.pdf",
     )
-    plt.savefig("data/bar_plot.png")
     plt.show()
 
 
