@@ -466,7 +466,7 @@ class BiasedMultiHeadAttention(nn.Module):
             attn_logits += torch.matmul(Q, K.transpose(-2, -1)) * self.scale
 
         if self.activate_bias:
-            attn_logits += self.bias_gate.view(1, H, 1, 1) * bias
+            attn_logits += torch.sigmoid(self.bias_gate).view(1, H, 1, 1) * bias
 
         if mask is not None:
             # Mask padding key positions: [B, 1, 1, L]
@@ -751,6 +751,13 @@ class ProteinMultiScaleTransformer(nn.Module):
         # ── Classification head ───────────────────────────────────────────
         self.head = ClassificationHead(self.E, cfg.num_classes, cfg.dropout)
 
+    def pair_dropout(self,x_pairwise: torch.Tensor, mask: torch.Tensor, rate: float, training: bool) -> torch.Tensor:
+        if not training or rate <= 0:
+            return x_pairwise
+        keep = (torch.rand(mask.shape, device=mask.device) > rate).float()  # [B, L]
+        pair_keep = (keep.unsqueeze(1) * keep.unsqueeze(2)).unsqueeze(1)    # [B, 1, L, L]
+        return x_pairwise * pair_keep / ((1 - rate) ** 2 + 1e-8)
+        
     def forward(
         self,
         tokens: torch.Tensor,
@@ -772,6 +779,7 @@ class ProteinMultiScaleTransformer(nn.Module):
         x_pairwise_scaled = x_pairwise_permute_scaled.permute(
             0, 3, 1, 2
         )  # [B, C, L, L]
+        x_pairwise_scaled = self.pair_dropout(x_pairwise_scaled, mask, self.cfg.pair_dropout_rate, self.training) 
 
         # 1. Build initial [B, L, E] embedding
         x = torch.zeros((B, L, self.E), device=tokens.device)

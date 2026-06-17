@@ -34,6 +34,7 @@ class ProteinModelConfig(BaseModel):
     num_heads: int = 8
     ffn_expansion: int = 2
     dropout: float = 0.1
+    pair_dropout_rate: float = 0.4
 
     # ── Pairwise CNN (inside each block) ──────────────────────────────────
     pairwise_cnn_channels: int = 32

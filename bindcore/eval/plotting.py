@@ -42,7 +42,7 @@ _PALETTE = [
 def _color(i: int) -> str:
     return _PALETTE[i % len(_PALETTE)]
 
-def _save(fig: plt.Figure, save_path: Optional[str | Path]) -> None:
+def _save(fig: plt.Figure, save_path: Optional) -> None:
     if save_path:
         fig.savefig(save_path, transparent=True, bbox_inches="tight")
         print(f"Saved → {save_path}")
@@ -61,7 +61,7 @@ def plot_roc_curves(
     records: Dict[str, "ResidueExample"],
     model_names: List[str],
     title: str = "ROC",
-    save_path: Optional[str | Path] = None,
+    save_path = None,
 ) -> plt.Figure:
     
     fig, ax = plt.subplots(figsize=(3.5, 3.5))
@@ -124,7 +124,7 @@ def plot_pr_curves(
     records: Dict[str, "ResidueExample"],
     model_names: List[str],
     title: str = "PR-AUC",
-    save_path: Optional[str | Path] = None,
+    save_path = None,
     interpolate: bool = True,
 ) -> plt.Figure:
     
@@ -197,7 +197,7 @@ _BAR_PANELS = [
 def plot_metrics_bar(
     results: List[Dict],
     title: str = "Model Performance",
-    save_path: Optional[str | Path] = None,
+    save_path = None,
 ) -> plt.Figure:
     
     model_names = [r["model"] for r in results]
