@@ -232,32 +232,49 @@ class PairwiseContextProjector(nn.Module):
         in_dim = nb_pairwise * 3
         self.mlp = MLP2(in_dim, embed_dim, embed_dim, dropout)
 
-    def forward(self, x_pairwise: torch.Tensor) -> torch.Tensor:
-        """x_pairwise : [B, C, L, L]  →  [B, L, E]"""
+    def forward(self, x_pairwise: torch.Tensor, batch_mask: torch.Tensor) -> torch.Tensor:
+        """
+        x_pairwise : [B, C, L, L]
+        batch_mask : [B, L]  (True = real token, False = padding)
+        →  [B, L, E]
+        """
         B, C, L, _ = x_pairwise.shape
-
         idx = torch.arange(L, device=x_pairwise.device)
         dist = (idx.unsqueeze(0) - idx.unsqueeze(1)).abs()  # [L, L]
         local_mask = (dist <= self.short_r).float()  # [L, L]
         distant_mask = 1.0 - local_mask  # [L, L]
 
-        n_local = local_mask.sum(dim=-1).clamp(min=1)  # [L]
-        n_distant = distant_mask.sum(dim=-1).clamp(min=1)  # [L]
+        # a pair (i, j) is valid only if both tokens are real (not padding)
+        pair_mask = (batch_mask.unsqueeze(1) & batch_mask.unsqueeze(2)).float()  # [B, L, L]
 
-        short_ctx = (x_pairwise * local_mask).sum(dim=-1) / n_local  # [B, C, L]
-        long_ctx = (x_pairwise * distant_mask).sum(dim=-1) / n_distant  # [B, C, L]
-        global_ctx = x_pairwise.mean(dim=-1)  # [B, C, L]
+        local_mask = local_mask.unsqueeze(0) * pair_mask      # [B, L, L]
+        distant_mask = distant_mask.unsqueeze(0) * pair_mask  # [B, L, L]
+        global_mask = pair_mask                               # [B, L, L]
+
+        n_local = local_mask.sum(dim=-1).clamp(min=1)      # [B, L]
+        n_distant = distant_mask.sum(dim=-1).clamp(min=1)  # [B, L]
+        n_global = global_mask.sum(dim=-1).clamp(min=1)    # [B, L]
+
+        local_mask = local_mask.unsqueeze(1)      # [B, 1, L, L]
+        distant_mask = distant_mask.unsqueeze(1)  # [B, 1, L, L]
+        global_mask = global_mask.unsqueeze(1)    # [B, 1, L, L]
+
+        short_ctx = (x_pairwise * local_mask).sum(dim=-1) / n_local.unsqueeze(1)     # [B, C, L]
+        long_ctx = (x_pairwise * distant_mask).sum(dim=-1) / n_distant.unsqueeze(1)  # [B, C, L]
+        global_ctx = (x_pairwise * global_mask).sum(dim=-1) / n_global.unsqueeze(1)  # [B, C, L]
 
         ctx = torch.cat(
             [
                 short_ctx.permute(0, 2, 1),  # [B, L, C]
-                long_ctx.permute(0, 2, 1),  # [B, L, C]
-                global_ctx.permute(0, 2, 1),  # [B, L, C]
+                long_ctx.permute(0, 2, 1),   # [B, L, C]
+                global_ctx.permute(0, 2, 1), # [B, L, C]
             ],
             dim=-1,
         )  # [B, L, 3C]
 
-        return self.mlp(ctx)  # [B, L, E]
+        out = self.mlp(ctx)  # [B, L, E]
+        out = out * batch_mask.unsqueeze(-1).to(out.dtype)  # zero-out padded query rows
+        return out
 
 
 # ---------------------------------------------------------------------------
@@ -350,19 +367,38 @@ class PairwiseCNN(nn.Module):
         # Final projection to attention heads
         self.to_heads = nn.Conv2d(merged_channels, num_heads, kernel_size=1, bias=True)
 
-    def forward(self, x_pairwise: torch.Tensor) -> torch.Tensor:
-        """x_pairwise: [B, nb_pairwise, L, L]  →  [B, num_heads, L, L]"""
+    def forward(self, x_pairwise: torch.Tensor, batch_mask: torch.Tensor) -> torch.Tensor:
+        """
+        x_pairwise: [B, nb_pairwise, L, L]
+        batch_mask: [B, L]  (True = real token, False = padding)
+        →  [B, num_heads, L, L]
+        """
+        B, _, L, _ = x_pairwise.shape
+
+        pair_mask = (batch_mask.unsqueeze(1) & batch_mask.unsqueeze(2))  # [B, L, L]
+        pair_mask_c = pair_mask.unsqueeze(1).float()  # [B, 1, L, L], broadcasts over channel dim
+
+        # Mask input so padded positions don't bleed into the conv stack
+        x_pairwise = x_pairwise * pair_mask_c
 
         # Bypass CNN logic if dilations is empty
         if not self.dilations:
-            return self.to_heads(x_pairwise)
+            out = self.to_heads(x_pairwise)
+            return out * pair_mask_c  # to_heads may project/bias, re-mask to be safe
 
         x = self.depthwise_act(self.depthwise_norm(self.depthwise(x_pairwise)))
+        x = x * pair_mask_c  # depthwise_norm bias can reintroduce nonzero padding
+
         feats = [branch(x) for branch in self.branches]
+        feats = [f * pair_mask_c for f in feats]  # each dilated branch re-masked independently
         x = torch.cat(feats, dim=1)
+
         x = self.post_act(self.post_norm(x))
+        x = x * pair_mask_c  # post_norm bias, same issue as above
+
         x = self.dropout(x)
-        return self.to_heads(x)
+        x = self.to_heads(x)
+        return x * pair_mask_c
 
 
 class BiasedMultiHeadAttention(nn.Module):
@@ -510,11 +546,11 @@ class TransformerBlock(nn.Module):
         """
         # 1. Update pairwise from current sequence representation
         if self.update_pairwise:
-            x_pairwise = self.pairwise_update(x_pairwise, x)
+            x_pairwise = self.pairwise_update(x_pairwise, x,mask)
 
         # 2. Compute attention bias from (updated) pairwise features
         if self.activate_pairwise_bias:
-            attn_bias = self.pairwise_cnn(x_pairwise)  # [B, H, L, L]
+            attn_bias = self.pairwise_cnn(x_pairwise,mask)  # [B, H, L, L]
         else:
             attn_bias = None
 
@@ -588,31 +624,45 @@ class PairwiseUpdateBlock(nn.Module):
     def forward(
         self,
         x_pairwise: torch.Tensor,  # [B, C, L, L]
-        x: torch.Tensor,  # [B, L, E]
+        x: torch.Tensor,           # [B, L, E]
+        batch_mask: torch.Tensor,  # [B, L]  (True = real token, False = padding)
     ) -> torch.Tensor:
         """Returns updated x_pairwise: [B, C, L, L]"""
         B, C, L, _ = x_pairwise.shape
 
-        # ── 1. Outer product update from sequence embedding ──────────────
-        # Project to low-dim: [B, L, low_dim]
-        a = self.seq_to_low(x)
+        # pair_mask[b, i, j] = True only if both i and j are real tokens
+        pair_mask = (batch_mask.unsqueeze(1) & batch_mask.unsqueeze(2))  # [B, L, L]
+        pair_mask_f = pair_mask.unsqueeze(-1).float()  # [B, L, L, 1] for the [B,L,L,C] tensors
+        pair_mask_c = pair_mask.unsqueeze(1).float()   # [B, 1, L, L] for the [B,C,L,L] tensors
 
-        # Outer product: for each pair (i,j), concat a_i ⊗ a_j
-        # [B, L, 1, low] × [B, 1, L, low] → [B, L, L, low*low] via flatten
+        # ── 0. Make sure incoming pairwise features have no garbage in padded slots ──
+        x_pairwise = x_pairwise * pair_mask_c
+
+        # ── 1. Outer product update from sequence embedding ──────────────
+        # Zero out padded token embeddings first: since outer is elementwise
+        # (a_i * a_j), zeroing a_i guarantees outer[i, j] == outer[j, i] == 0
+        # for any padded i, regardless of a_j.
+        a = self.seq_to_low(x)
+        a = a * batch_mask.unsqueeze(-1).to(a.dtype)  # [B, L, low_dim]
+
         outer = a.unsqueeze(2) * a.unsqueeze(1)  # [B, L, L, low_dim]
-        # Note: full outer product would be a.unsqueeze(2) ⊗ a.unsqueeze(1)
-        # but elementwise product (low_dim must match) is cheaper and sufficient
         outer = self.outer_proj(outer)  # [B, L, L, C]
 
         # Symmetrize: pairwise features should be symmetric for contact/distance
         outer = (outer + outer.transpose(1, 2)) / 2  # [B, L, L, C]
 
-        # Apply LayerNorm in the feature dimension then add as residual
-        outer = self.norm(outer).permute(0, 3, 1, 2)  # [B, C, L, L]
+        # LayerNorm has a learnable bias, so even zeroed-out padded entries
+        # can come out nonzero after norm — re-mask afterward.
+        outer = self.norm(outer) * pair_mask_f
+        outer = outer.permute(0, 3, 1, 2)  # [B, C, L, L]
 
         # ── 2. CNN refinement of existing pairwise features ──────────────
         x_pairwise = x_pairwise + outer  # residual from sequence
-        x_pairwise = x_pairwise + self.cnn(x_pairwise)  # residual spatial refine
+        x_pairwise = x_pairwise * pair_mask_c  # re-mask before convolving
+
+        cnn_out = self.cnn(x_pairwise)
+        cnn_out = cnn_out * pair_mask_c  # conv receptive field can leak padding into real tokens
+        x_pairwise = x_pairwise + cnn_out  # residual spatial refine
 
         return x_pairwise
 
@@ -736,7 +786,7 @@ class ProteinMultiScaleTransformer(nn.Module):
             x = x + self.local_proj(x_local)
 
         if self.use_pairwise_features:
-            x = x + self.pairwise_init_proj(x_pairwise_scaled)
+            x = x + self.pairwise_init_proj(x_pairwise_scaled, mask)
 
         if self.use_plm_embedding:
             x = x + self.plm_proj(plm_pad)
