@@ -209,7 +209,9 @@ class ScalarFeatureProjector(nn.Module):
 class ProteinLengthProjector(nn.Module):
     """Projects the mask-derived protein length as a global feature."""
 
-    def __init__(self, embed_dim: int, hidden_dim: int, max_seq_len: int, dropout: float):
+    def __init__(
+        self, embed_dim: int, hidden_dim: int, max_seq_len: int, dropout: float
+    ):
         super().__init__()
         self.max_seq_len = max(1, max_seq_len)
         self.mlp = MLP2(1, hidden_dim, embed_dim, dropout=dropout)
@@ -254,7 +256,9 @@ class PairwiseContextProjector(nn.Module):
         in_dim = nb_pairwise * 3
         self.mlp = MLP2(in_dim, embed_dim, embed_dim, dropout)
 
-    def forward(self, x_pairwise: torch.Tensor, batch_mask: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self, x_pairwise: torch.Tensor, batch_mask: torch.Tensor
+    ) -> torch.Tensor:
         """
         x_pairwise : [B, C, L, L]
         batch_mask : [B, L]  (True = real token, False = padding)
@@ -267,29 +271,37 @@ class PairwiseContextProjector(nn.Module):
         distant_mask = 1.0 - local_mask  # [L, L]
 
         # a pair (i, j) is valid only if both tokens are real (not padding)
-        pair_mask = (batch_mask.unsqueeze(1) & batch_mask.unsqueeze(2)).float()  # [B, L, L]
+        pair_mask = (
+            batch_mask.unsqueeze(1) & batch_mask.unsqueeze(2)
+        ).float()  # [B, L, L]
 
-        local_mask = local_mask.unsqueeze(0) * pair_mask      # [B, L, L]
+        local_mask = local_mask.unsqueeze(0) * pair_mask  # [B, L, L]
         distant_mask = distant_mask.unsqueeze(0) * pair_mask  # [B, L, L]
-        global_mask = pair_mask                               # [B, L, L]
+        global_mask = pair_mask  # [B, L, L]
 
-        n_local = local_mask.sum(dim=-1).clamp(min=1)      # [B, L]
+        n_local = local_mask.sum(dim=-1).clamp(min=1)  # [B, L]
         n_distant = distant_mask.sum(dim=-1).clamp(min=1)  # [B, L]
-        n_global = global_mask.sum(dim=-1).clamp(min=1)    # [B, L]
+        n_global = global_mask.sum(dim=-1).clamp(min=1)  # [B, L]
 
-        local_mask = local_mask.unsqueeze(1)      # [B, 1, L, L]
+        local_mask = local_mask.unsqueeze(1)  # [B, 1, L, L]
         distant_mask = distant_mask.unsqueeze(1)  # [B, 1, L, L]
-        global_mask = global_mask.unsqueeze(1)    # [B, 1, L, L]
+        global_mask = global_mask.unsqueeze(1)  # [B, 1, L, L]
 
-        short_ctx = (x_pairwise * local_mask).sum(dim=-1) / n_local.unsqueeze(1)     # [B, C, L]
-        long_ctx = (x_pairwise * distant_mask).sum(dim=-1) / n_distant.unsqueeze(1)  # [B, C, L]
-        global_ctx = (x_pairwise * global_mask).sum(dim=-1) / n_global.unsqueeze(1)  # [B, C, L]
+        short_ctx = (x_pairwise * local_mask).sum(dim=-1) / n_local.unsqueeze(
+            1
+        )  # [B, C, L]
+        long_ctx = (x_pairwise * distant_mask).sum(dim=-1) / n_distant.unsqueeze(
+            1
+        )  # [B, C, L]
+        global_ctx = (x_pairwise * global_mask).sum(dim=-1) / n_global.unsqueeze(
+            1
+        )  # [B, C, L]
 
         ctx = torch.cat(
             [
                 short_ctx.permute(0, 2, 1),  # [B, L, C]
-                long_ctx.permute(0, 2, 1),   # [B, L, C]
-                global_ctx.permute(0, 2, 1), # [B, L, C]
+                long_ctx.permute(0, 2, 1),  # [B, L, C]
+                global_ctx.permute(0, 2, 1),  # [B, L, C]
             ],
             dim=-1,
         )  # [B, L, 3C]
@@ -304,12 +316,93 @@ class PairwiseContextProjector(nn.Module):
 # ---------------------------------------------------------------------------
 
 
-def _make_group_norm(num_channels: int, max_groups: int = 32) -> nn.GroupNorm:
-    """GroupNorm with the largest valid number of groups ≤ max_groups."""
+def _valid_group_count(num_channels: int, max_groups: int = 32) -> int:
+    """Largest valid group count not exceeding max_groups."""
     for g in range(min(max_groups, num_channels), 0, -1):
         if num_channels % g == 0:
-            return nn.GroupNorm(g, num_channels)
-    return nn.GroupNorm(1, num_channels)
+            return g
+    return 1
+
+
+class MaskedPairwiseGroupNorm(nn.Module):
+    """
+    GroupNorm for pairwise [B, C, L, L] tensors that ignores padded pairs.
+
+    Standard GroupNorm normalizes over all spatial positions, so zero-padded
+    regions change the statistics for real residue pairs whenever the batch
+    max length changes.  This layer keeps the same per-channel affine
+    parameters but computes mean/variance only over valid (i, j) residue pairs.
+    """
+
+    def __init__(self, num_channels: int, max_groups: int = 32, eps: float = 1e-5):
+        super().__init__()
+        self.num_channels = num_channels
+        self.num_groups = _valid_group_count(num_channels, max_groups)
+        self.eps = eps
+        self.weight = nn.Parameter(torch.ones(num_channels))
+        self.bias = nn.Parameter(torch.zeros(num_channels))
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        pair_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        if pair_mask is None:
+            return F.group_norm(
+                x,
+                self.num_groups,
+                self.weight,
+                self.bias,
+                self.eps,
+            )
+
+        B, C, L, _ = x.shape
+        G = self.num_groups
+        channels_per_group = C // G
+
+        mask = pair_mask.to(device=x.device, dtype=x.dtype)
+        if mask.dim() == 3:
+            mask = mask.unsqueeze(1)
+        mask = mask[:, :1].unsqueeze(1)  # [B, 1, 1, L, L]
+
+        x_grouped = x.view(B, G, channels_per_group, L, L)
+        valid_pairs = mask.sum(dim=(-1, -2), keepdim=True)
+        denom = (valid_pairs * channels_per_group).clamp(min=1.0)
+
+        mean = (x_grouped * mask).sum(dim=(2, 3, 4), keepdim=True) / denom
+        centered = x_grouped - mean
+        var = (centered.square() * mask).sum(dim=(2, 3, 4), keepdim=True) / denom
+
+        x_norm = centered * torch.rsqrt(var + self.eps)
+        x_norm = x_norm.view(B, C, L, L)
+        return x_norm * self.weight.view(1, C, 1, 1) + self.bias.view(1, C, 1, 1)
+
+
+class MaskedPairwiseConvBranch(nn.Module):
+    """Conv -> masked pairwise norm -> GELU branch used by PairwiseCNN."""
+
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        kernel_size: int,
+        padding: int,
+        dilation: int,
+    ):
+        super().__init__()
+        self.conv = nn.Conv2d(
+            in_channels,
+            out_channels,
+            kernel_size=kernel_size,
+            padding=padding,
+            dilation=dilation,
+            bias=False,
+        )
+        self.norm = MaskedPairwiseGroupNorm(out_channels)
+        self.act = nn.GELU()
+
+    def forward(self, x: torch.Tensor, pair_mask: torch.Tensor) -> torch.Tensor:
+        return self.act(self.norm(self.conv(x), pair_mask))
 
 
 class PairwiseCNN(nn.Module):
@@ -359,37 +452,34 @@ class PairwiseCNN(nn.Module):
             groups=nb_pairwise,
             bias=False,
         )
-        self.depthwise_norm = _make_group_norm(nb_pairwise)
+        self.depthwise_norm = MaskedPairwiseGroupNorm(nb_pairwise)
         self.depthwise_act = nn.GELU()
 
         # Stage 2: dilated branches for multi-scale mixing
         branches = []
         for d in self.dilations:
             branches.append(
-                nn.Sequential(
-                    nn.Conv2d(
-                        nb_pairwise,
-                        cnn_channels,
-                        kernel_size=kernel_size,
-                        padding=d * pad,
-                        dilation=d,
-                        bias=False,
-                    ),
-                    _make_group_norm(cnn_channels),
-                    nn.GELU(),
+                MaskedPairwiseConvBranch(
+                    nb_pairwise,
+                    cnn_channels,
+                    kernel_size=kernel_size,
+                    padding=d * pad,
+                    dilation=d,
                 )
             )
         self.branches = nn.ModuleList(branches)
 
         merged_channels = cnn_channels * len(self.dilations)
-        self.post_norm = _make_group_norm(merged_channels)
+        self.post_norm = MaskedPairwiseGroupNorm(merged_channels)
         self.post_act = nn.GELU()
         self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
 
         # Final projection to attention heads
         self.to_heads = nn.Conv2d(merged_channels, num_heads, kernel_size=1, bias=True)
 
-    def forward(self, x_pairwise: torch.Tensor, batch_mask: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self, x_pairwise: torch.Tensor, batch_mask: torch.Tensor
+    ) -> torch.Tensor:
         """
         x_pairwise: [B, nb_pairwise, L, L]
         batch_mask: [B, L]  (True = real token, False = padding)
@@ -397,8 +487,10 @@ class PairwiseCNN(nn.Module):
         """
         B, _, L, _ = x_pairwise.shape
 
-        pair_mask = (batch_mask.unsqueeze(1) & batch_mask.unsqueeze(2))  # [B, L, L]
-        pair_mask_c = pair_mask.unsqueeze(1).float()  # [B, 1, L, L], broadcasts over channel dim
+        pair_mask = batch_mask.unsqueeze(1) & batch_mask.unsqueeze(2)  # [B, L, L]
+        pair_mask_c = pair_mask.unsqueeze(
+            1
+        ).float()  # [B, 1, L, L], broadcasts over channel dim
 
         # Mask input so padded positions don't bleed into the conv stack
         x_pairwise = x_pairwise * pair_mask_c
@@ -408,14 +500,18 @@ class PairwiseCNN(nn.Module):
             out = self.to_heads(x_pairwise)
             return out * pair_mask_c  # to_heads may project/bias, re-mask to be safe
 
-        x = self.depthwise_act(self.depthwise_norm(self.depthwise(x_pairwise)))
+        x = self.depthwise_act(
+            self.depthwise_norm(self.depthwise(x_pairwise), pair_mask)
+        )
         x = x * pair_mask_c  # depthwise_norm bias can reintroduce nonzero padding
 
-        feats = [branch(x) for branch in self.branches]
-        feats = [f * pair_mask_c for f in feats]  # each dilated branch re-masked independently
+        feats = [branch(x, pair_mask) for branch in self.branches]
+        feats = [
+            f * pair_mask_c for f in feats
+        ]  # each dilated branch re-masked independently
         x = torch.cat(feats, dim=1)
 
-        x = self.post_act(self.post_norm(x))
+        x = self.post_act(self.post_norm(x, pair_mask))
         x = x * pair_mask_c  # post_norm bias, same issue as above
 
         x = self.dropout(x)
@@ -479,7 +575,7 @@ class BiasedMultiHeadAttention(nn.Module):
         def _proj_reshape(proj, t):
             return proj(t).reshape(B, L, H, D).transpose(1, 2)
 
-        attn_logits = torch.zeros((B, H, L, L), device=x.device)
+        attn_logits = torch.zeros((B, H, L, L), device=x.device, dtype=x.dtype)
         V = _proj_reshape(self.v_proj, x)
         if self.activate_classical_attention:
             Q = _proj_reshape(self.q_proj, x)
@@ -511,7 +607,10 @@ class BiasedMultiHeadAttention(nn.Module):
         if mask is not None:
             out = out * mask.float().unsqueeze(-1)  # [B, L, 1]
 
-        return residual + self.out_proj(out)
+        out = residual + self.out_proj(out)
+        if mask is not None:
+            out = out * mask.float().unsqueeze(-1).to(out.dtype)
+        return out
 
 
 class TransformerBlock(nn.Module):
@@ -568,17 +667,19 @@ class TransformerBlock(nn.Module):
         """
         # 1. Update pairwise from current sequence representation
         if self.update_pairwise:
-            x_pairwise = self.pairwise_update(x_pairwise, x,mask)
+            x_pairwise = self.pairwise_update(x_pairwise, x, mask)
 
         # 2. Compute attention bias from (updated) pairwise features
         if self.activate_pairwise_bias:
-            attn_bias = self.pairwise_cnn(x_pairwise,mask)  # [B, H, L, L]
+            attn_bias = self.pairwise_cnn(x_pairwise, mask)  # [B, H, L, L]
         else:
             attn_bias = None
 
         # 3. Sequence update
         x = self.attention(x, attn_bias, mask)
         x = self.ffn(x)
+        if mask is not None:
+            x = x * mask.unsqueeze(-1).to(dtype=x.dtype)
 
         return x, x_pairwise
 
@@ -627,35 +728,42 @@ class PairwiseUpdateBlock(nn.Module):
         self.outer_proj = nn.Linear(self.low_dim, nb_pairwise)
 
         # Lightweight CNN to refine pairwise features with local spatial context
-        self.cnn = nn.Sequential(
-            nn.Conv2d(
-                nb_pairwise,
-                nb_pairwise,
-                kernel_size=3,
-                padding=1,
-                groups=nb_pairwise,
-                bias=False,
-            ),  # depthwise
-            _make_group_norm(nb_pairwise),
-            nn.GELU(),
-            nn.Conv2d(nb_pairwise, nb_pairwise, kernel_size=1, bias=True),  # pointwise
-            nn.Dropout(dropout),
+        self.cnn_depthwise = nn.Conv2d(
+            nb_pairwise,
+            nb_pairwise,
+            kernel_size=3,
+            padding=1,
+            groups=nb_pairwise,
+            bias=False,
         )
+        self.cnn_norm = MaskedPairwiseGroupNorm(nb_pairwise)
+        self.cnn_act = nn.GELU()
+        self.cnn_pointwise = nn.Conv2d(
+            nb_pairwise,
+            nb_pairwise,
+            kernel_size=1,
+            bias=True,
+        )
+        self.cnn_dropout = nn.Dropout(dropout)
         self.norm = nn.LayerNorm(nb_pairwise)
 
     def forward(
         self,
         x_pairwise: torch.Tensor,  # [B, C, L, L]
-        x: torch.Tensor,           # [B, L, E]
+        x: torch.Tensor,  # [B, L, E]
         batch_mask: torch.Tensor,  # [B, L]  (True = real token, False = padding)
     ) -> torch.Tensor:
         """Returns updated x_pairwise: [B, C, L, L]"""
         B, C, L, _ = x_pairwise.shape
 
         # pair_mask[b, i, j] = True only if both i and j are real tokens
-        pair_mask = (batch_mask.unsqueeze(1) & batch_mask.unsqueeze(2))  # [B, L, L]
-        pair_mask_f = pair_mask.unsqueeze(-1).float()  # [B, L, L, 1] for the [B,L,L,C] tensors
-        pair_mask_c = pair_mask.unsqueeze(1).float()   # [B, 1, L, L] for the [B,C,L,L] tensors
+        pair_mask = batch_mask.unsqueeze(1) & batch_mask.unsqueeze(2)  # [B, L, L]
+        pair_mask_f = pair_mask.unsqueeze(
+            -1
+        ).float()  # [B, L, L, 1] for the [B,L,L,C] tensors
+        pair_mask_c = pair_mask.unsqueeze(
+            1
+        ).float()  # [B, 1, L, L] for the [B,C,L,L] tensors
 
         # ── 0. Make sure incoming pairwise features have no garbage in padded slots ──
         x_pairwise = x_pairwise * pair_mask_c
@@ -682,8 +790,14 @@ class PairwiseUpdateBlock(nn.Module):
         x_pairwise = x_pairwise + outer  # residual from sequence
         x_pairwise = x_pairwise * pair_mask_c  # re-mask before convolving
 
-        cnn_out = self.cnn(x_pairwise)
-        cnn_out = cnn_out * pair_mask_c  # conv receptive field can leak padding into real tokens
+        cnn_out = self.cnn_depthwise(x_pairwise)
+        cnn_out = self.cnn_act(self.cnn_norm(cnn_out, pair_mask))
+        cnn_out = cnn_out * pair_mask_c
+        cnn_out = self.cnn_pointwise(cnn_out)
+        cnn_out = self.cnn_dropout(cnn_out)
+        cnn_out = (
+            cnn_out * pair_mask_c
+        )  # conv receptive field can leak padding into real tokens
         x_pairwise = x_pairwise + cnn_out  # residual spatial refine
 
         return x_pairwise
@@ -784,21 +898,16 @@ class ProteinMultiScaleTransformer(nn.Module):
 
         # ── Classification head ───────────────────────────────────────────
         self.head = ClassificationHead(self.E, cfg.num_classes, cfg.dropout)
-        self.length_head = nn.Sequential(
-            nn.LayerNorm(1),
-            nn.Linear(1, self.E),
-            nn.GELU(),
-            nn.Dropout(cfg.dropout),
-            nn.Linear(self.E, cfg.num_classes),
-        )
 
-    def pair_dropout(self,x_pairwise: torch.Tensor, mask: torch.Tensor, rate: float, training: bool) -> torch.Tensor:
+    def pair_dropout(
+        self, x_pairwise: torch.Tensor, mask: torch.Tensor, rate: float, training: bool
+    ) -> torch.Tensor:
         if not training or rate <= 0:
             return x_pairwise
         keep = (torch.rand(mask.shape, device=mask.device) > rate).float()  # [B, L]
-        pair_keep = (keep.unsqueeze(1) * keep.unsqueeze(2)).unsqueeze(1)    # [B, 1, L, L]
+        pair_keep = (keep.unsqueeze(1) * keep.unsqueeze(2)).unsqueeze(1)  # [B, 1, L, L]
         return x_pairwise * pair_keep / ((1 - rate) ** 2 + 1e-8)
-        
+
     def forward(
         self,
         tokens: torch.Tensor,
@@ -822,15 +931,14 @@ class ProteinMultiScaleTransformer(nn.Module):
             protein_lengths = mask_bool.to(dtype=torch.float32).sum(dim=1)
         mask_float = mask_bool.to(dtype=x_pairwise.dtype)
 
-        pairwise_mask = (
-            mask_float.unsqueeze(1).unsqueeze(-1)
-            * mask_float.unsqueeze(1).unsqueeze(2)
-        )
+        pairwise_mask = mask_float.unsqueeze(1).unsqueeze(-1) * mask_float.unsqueeze(
+            1
+        ).unsqueeze(2)
         x_pairwise = x_pairwise * pairwise_mask
 
-        x_pairwise = subtract_random_coil_pairwise_baseline(
-            x_pairwise, self.pairwise_features, mask_bool
-        )
+        # x_pairwise = subtract_random_coil_pairwise_baseline(
+        #     x_pairwise, self.pairwise_features, mask_bool
+        # ) # Finnally don't seem to help
 
         x_pairwise_permute = x_pairwise.permute(0, 2, 3, 1)  # [B, L, L, C]
         x_pairwise_permute_scaled = self.pair_wise_scaler(x_pairwise_permute)
@@ -864,6 +972,7 @@ class ProteinMultiScaleTransformer(nn.Module):
             x = x + self.plm_proj(plm_pad)
 
         x = self.embed_norm(x)
+        x = x * mask_bool.unsqueeze(-1).to(dtype=x.dtype)
 
         # 2. Transformer blocks — x_pairwise evolves across blocks
         if self.share_block_weights:
@@ -876,9 +985,8 @@ class ProteinMultiScaleTransformer(nn.Module):
                 x, x_pairwise_scaled = block(x, x_pairwise_scaled, mask_bool)
 
         # 3. Classification head
-        length_head = self.length_proj.normalize(protein_lengths)
-        length_head = length_head.view(B, 1, 1).expand(-1, L, -1)
-        return self.head(x) + self.length_head(length_head.to(dtype=x.dtype))
+        logits = self.head(x)
+        return logits * mask_bool.unsqueeze(-1).to(dtype=logits.dtype)
 
 
 # ---------------------------------------------------------------------------
