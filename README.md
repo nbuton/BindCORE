@@ -65,16 +65,34 @@ pip install -e .          # installs bindcore as an editable package
 
 ##  Using BindCORE as a Prediction Tool
 
-We provide two ways to run BindCORE: a "zero-setup" cloud version and a high-throughput local version.
+We provide three ways to run BindCORE: a "zero-setup" cloud notebook, an
+interactive notebook for your own machine, and a high-throughput local pipeline.
+Both notebooks predict **LIP & MoRF directly from a sequence** (they generate the
+conformational ensemble for you); see [`colab/README.md`](colab/README.md) for details.
 
 ### Option A: Google Colab (Recommended for single sequences)
 For a quick prediction without local installation, use our managed notebook. It handles environment setup and dependencies automatically.
 > [!TIP]
-> **[Open in Colab](https://colab.research.google.com/github/xxxxx)** — Input your sequence and click **Runtime > Run All**.
+> **[Open in Colab](https://colab.research.google.com/github/nbuton/BindCORE/blob/main/colab/BindCORE_Colab.ipynb)** — Input your sequence and click **Runtime > Run All**.
 
 ---
 
-### Option B: Local Production Pipeline
+### Option B: Local Interactive Notebook
+Run the same studio in Jupyter on your own machine (CPU or CUDA) — input a sequence
+and get per-residue LIP & MoRF predictions, no precomputed ensembles required.
+
+```bash
+# from inside your BindCORE checkout
+jupyter lab colab/BindCORE_Local.ipynb
+```
+
+The first cell auto-locates the repo, installs dependencies with `uv`, downloads the
+IDPFold2 weights, and builds `cg2all` in an isolated environment (first-run setup
+~10–15 min; subsequent runs reuse it). A CUDA PyTorch build is strongly recommended.
+
+---
+
+### Option C: Local Production Pipeline
 Use this for large-scale datasets or custom workflows. This pipeline requires pre-generated conformational ensembles.
 
 #### 1. Generate Conformational Ensembles

@@ -301,7 +301,7 @@ class bindcore_Trainer:
 
             # 2. Cosine decay for the remaining 90%
             cosine_scheduler = CosineAnnealingLR(
-                self.optimizer, T_max=(total_steps - warmup_steps), eta_min=1e-6
+                self.optimizer, T_max=(total_steps - warmup_steps), eta_min=5e-5
             )
 
             # 3. Combine them
