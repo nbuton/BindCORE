@@ -1,21 +1,38 @@
 """
 scripts/attribution.py
 ----------------------
-Position-independent feature attribution for ProteinMultiScaleTransformer
-using DeepLiftShap (Captum).
+Feature attribution for ProteinMultiScaleTransformer, in two complementary
+parts:
 
-For each feature group (x_scalar, x_local, x_pairwise), produces one
-importance score per feature channel — averaged over residue positions and
-over all proteins in the test set — so the result is a global, position-
-independent ranking of which input features drive LIP predictions.
+  (A) Within-group channel ranking via DeepLiftShap (Captum), exactly as
+      before: for each feature group (x_scalar, x_local, x_pairwise), one
+      importance score per feature channel, averaged over residue positions
+      and over all proteins in the test set.
+
+  (B) Cross-group comparable attribution via an EXACT Shapley value
+      decomposition over the three feature groups treated as players in a
+      cooperative game. This answers "how much does each input modality
+      (scalar / local / pairwise) contribute to the prediction", on a single
+      shared scale, with no dilution from group dimensionality.
+
+Part (A) attributions are NOT comparable across groups: x_scalar has F
+channels, x_local has F_l x L elements, x_pairwise has C x L x L elements,
+and averaging |attribution| over residue or residue-pair dimensions divides
+the same total "swap effect" by a denominator that grows with group size
+(L for x_local, L^2 for x_pairwise). Part (B) fixes this at the group level,
+and is then used to rescale part (A) so individual channels from different
+groups can also be ranked together (see `rescale_with_group_shapley`).
 
 Key design decisions
 --------------------
-* x_scalar  : global per-protein features, shape [F]         → no residue dim
-* x_local   : per-residue features, stored as [F, L]         → transposed to [L, F] for attribution
-* x_pairwise: pairwise features, stored as [C, L, L]         → importance averaged over (L, L)
-* Baselines : three strategies — "sample" (random test seqs, recommended),
-              "zeros", or "mean" (per-channel mean + small noise)
+* x_scalar  : global per-protein features, shape [F]         -> no residue dim
+* x_local   : per-residue features, stored as [F, L]         -> transposed to [L, F] for attribution
+* x_pairwise: pairwise features, stored as [C, L, L]         -> importance averaged over (L, L)
+* Baselines / references : three strategies for (A) -- "sample" (random test
+              seqs, recommended), "zeros", or "mean" (per-channel mean + small
+              noise). (B) always uses "sample" (other held-out proteins),
+              since the Shapley value function needs a real, valid protein
+              to plug into the model wherever a group is "absent".
 * Unknown labels (-1, -100, "-", NaN) are excluded from the residue-level
   pooling so they don't dilute the attribution signal.
 * Fixed inputs inside _FeatureWrapper are expanded to match the dynamic
@@ -30,12 +47,15 @@ Usage
         --output  results/feature_importance.csv \
         --n_baselines 20 \
         --strategy sample \
-        --features x_scalar x_local
+        --features x_scalar x_local x_pairwise \
+        --n_baseline_draws 20 \
+        --group_shapley_output results/group_shapley.csv
 """
 
 from __future__ import annotations
 
 import argparse
+import itertools
 import traceback
 from pathlib import Path
 
@@ -51,6 +71,9 @@ from torch.utils.data import DataLoader
 from bindcore.data.datasets import ProteinDataset, collate_proteins
 from bindcore.data.io import prepare_data, read_protein_data
 from bindcore.engine.predictor import load_checkpoint
+
+# The three input "players" for the group-level Shapley decomposition.
+GROUPS = ("x_scalar", "x_local", "x_pairwise")
 
 # ============================================================================
 # 1. Model wrapper
@@ -249,7 +272,7 @@ def _collect_samples(
 
 
 # ============================================================================
-# 3. Baseline construction
+# 3. Baseline construction (for part A, within-group DeepLiftShap)
 # ============================================================================
 
 
@@ -313,7 +336,7 @@ def _build_baselines(
 
 
 # ============================================================================
-# 4. Padding utility
+# 4. Padding utility (for part A, within-group DeepLiftShap)
 # ============================================================================
 
 
@@ -367,7 +390,259 @@ def _pad_along_seq(
 
 
 # ============================================================================
-# 5. Per-protein attribution
+# 5. Group-level Shapley value attribution (cross-group comparable)
+# ============================================================================
+#
+# DeepLiftShap attributions computed independently per feature group (part A,
+# sections 6-7 below) are only comparable *within* a group: x_scalar has F
+# channels, x_local has F_l x L elements, x_pairwise has C x L x L elements.
+# Averaging |attribution| over residue or residue-pair dimensions divides the
+# same "swap effect" by a denominator that grows with group dimensionality
+# (L for x_local, L^2 for x_pairwise), so scalar features come out inflated
+# relative to pairwise features almost regardless of true importance.
+#
+# To get a cross-group comparable measure we instead treat the three feature
+# groups as three "players" in a cooperative game and compute their EXACT
+# Shapley value (Shapley, 1953). With only 3 players there are 2^3 = 8
+# coalitions, so the Shapley value can be computed exactly -- by averaging
+# each group's marginal contribution over all 3! = 6 orderings -- rather than
+# approximated by Monte-Carlo sampling of permutations, which is what's
+# necessary for the high-dimensional feature attribution case (and is in
+# fact why per-channel attribution uses DeepLiftShap rather than Shapley
+# directly: a real protein has too many residues/channels for exact Shapley
+# to be tractable, but a protein only has 3 *feature groups*).
+#
+# The resulting three numbers satisfy the efficiency axiom:
+#     shapley(x_scalar) + shapley(x_local) + shapley(x_pairwise)
+#         = v(all groups present) - v(all groups absent)
+# i.e. they decompose the TOTAL effect of the input on the model's output
+# additively, on the same logit scale, with no dilution from group size.
+# This is the property that makes them directly comparable across groups.
+
+
+def _resize_seq_2d(t: torch.Tensor, target_L: int) -> torch.Tensor:
+    """Resize a [F, L_b] tensor to [F, target_L] by truncation or zero-pad
+    along the sequence dimension."""
+    L_b = t.shape[1]
+    if L_b == target_L:
+        return t
+    if L_b > target_L:
+        return t[:, :target_L]
+    return torch.nn.functional.pad(t, (0, target_L - L_b))
+
+
+def _resize_seq_3d(t: torch.Tensor, target_L: int) -> torch.Tensor:
+    """Resize a [C, L_b, L_b] tensor to [C, target_L, target_L] by
+    truncation or zero-pad along both spatial dimensions."""
+    L_b = t.shape[1]
+    if L_b == target_L:
+        return t
+    if L_b > target_L:
+        return t[:, :target_L, :target_L]
+    pad = target_L - L_b
+    return torch.nn.functional.pad(t, (0, pad, 0, pad))
+
+
+def _value_kwargs(
+    sample: dict, baseline_sample: dict, present: frozenset, device: torch.device
+) -> dict:
+    """
+    Build model kwargs for one coalition `present`.
+
+    Groups in `present` take the real sample's values; the complementary
+    groups take the matching feature block from `baseline_sample` (a
+    different, real, held-out protein), resized along the sequence
+    dimension(s) to the real sample's length L so tensor shapes stay
+    consistent with the sample's own tokens/mask. tokens, mask, and plm_pad
+    always come from the real sample -- only the three GROUPS are swapped.
+    """
+    L = sample["mask"].shape[1]
+    kwargs: dict = {
+        "tokens": sample["tokens"].to(device),
+        "mask": sample["mask"].to(device),
+        "plm_pad": sample["plm_pad"].to(device) if sample["plm_pad"] is not None else None,
+    }
+    for g in GROUPS:
+        if g in present:
+            kwargs[g] = sample[g].to(device)
+            continue
+        b = baseline_sample[g].squeeze(0)
+        if g == "x_local":
+            b = _resize_seq_2d(b, L)
+        elif g == "x_pairwise":
+            b = _resize_seq_3d(b, L)
+        # x_scalar has no sequence dimension, used as-is
+        kwargs[g] = b.unsqueeze(0).to(device)
+    return kwargs
+
+
+@torch.no_grad()
+def _coalition_value(
+    model: nn.Module,
+    sample: dict,
+    baseline_sample: dict,
+    present: frozenset,
+    device: torch.device,
+) -> float:
+    """
+    v(S): masked-mean predicted logit over known-label residues, with groups
+    in `present` at their real value and the rest at the baseline protein's
+    value (resized to match the sample's length). This is the same masked-
+    mean-logit quantity used as the attribution target in _FeatureWrapper,
+    so the group-level Shapley values and the channel-level DeepLiftShap
+    attributions live on the same scale.
+    """
+    kwargs = _value_kwargs(sample, baseline_sample, present, device)
+    logits = model(**kwargs)
+    if logits.dim() == 3:
+        logits = logits.squeeze(-1)
+    mask = sample["mask"].to(device)
+    known = sample["known_mask"].to(device)
+    m = (mask & known).float()
+    valid = m.sum(dim=1, keepdim=True).clamp(min=1)
+    return ((logits * m).sum(dim=1) / valid.squeeze(1)).item()
+
+
+def _exact_shapley_3(values: dict[frozenset, float]) -> dict[str, float]:
+    """
+    Exact Shapley value for 3 players, computed as the average marginal
+    contribution of each player over all 3! = 6 orderings. This is
+    equivalent to the standard combinatorial Shapley formula
+        phi_i = sum_{S subseteq N\\{i}} |S|!(|N|-|S|-1)!/|N|! * (v(S+i)-v(S))
+    but easier to verify correct by inspection, and just as exact (no
+    sampling) since all orderings are enumerated.
+
+    `values` must contain v(S) for every subset S of GROUPS visited while
+    building up each ordering, i.e. for all 8 subsets of the power set.
+    """
+    phi = {g: 0.0 for g in GROUPS}
+    perms = list(itertools.permutations(GROUPS))
+    for perm in perms:
+        coalition = frozenset()
+        for g in perm:
+            v_before = values[coalition]
+            coalition = coalition | {g}
+            v_after = values[coalition]
+            phi[g] += v_after - v_before
+    for g in GROUPS:
+        phi[g] /= len(perms)
+    return phi
+
+
+def protein_group_shapley(
+    model: nn.Module,
+    sample: dict,
+    baseline_pool: list[dict],
+    sample_idx: int,
+    n_baseline_draws: int,
+    device: torch.device,
+    rng: np.random.Generator,
+) -> tuple[dict, dict, float]:
+    """
+    Exact group-level Shapley values for one protein, averaged over
+    `n_baseline_draws` randomly sampled reference proteins (drawn from
+    `baseline_pool`, excluding the protein itself) standing in for the
+    "group absent" condition. Averaging over reference proteins estimates
+    the expectation of the coalition value function under the empirical
+    distribution of held-out feature values -- the same role baselines play
+    for DeepLiftShap, and the standard "interventional" / sampled-reference
+    approach to Shapley-value estimation in ML (as opposed to retraining a
+    model per coalition, which is intractable here).
+
+    v(all groups present) does not depend on the baseline and is computed
+    once and reused across draws.
+
+    Returns
+    -------
+    mean_shapley, std_shapley : dict {group_name: float}, mean and std
+        across baseline draws of phi(group) for this protein.
+    mean_total_effect : average of v(all groups) - v(no groups) across
+        draws; equals sum(mean_shapley.values()) by the efficiency axiom
+        (up to Monte-Carlo noise from averaging over different draws).
+    """
+    pool_idx = [i for i in range(len(baseline_pool)) if i != sample_idx]
+    full = frozenset(GROUPS)
+    empty: frozenset = frozenset()
+    v_full = _coalition_value(model, sample, sample, full, device)  # baseline unused when all present
+
+    draws = {g: [] for g in GROUPS}
+    total_effects = []
+    for _ in range(n_baseline_draws):
+        b_idx = pool_idx[rng.integers(len(pool_idx))]
+        baseline_sample = baseline_pool[b_idx]
+
+        values = {full: v_full}
+        for r in range(0, len(GROUPS)):  # r = 0, 1, 2 (full handled above)
+            for combo in itertools.combinations(GROUPS, r):
+                present = frozenset(combo)
+                values[present] = _coalition_value(model, sample, baseline_sample, present, device)
+
+        phi = _exact_shapley_3(values)
+        for g in GROUPS:
+            draws[g].append(phi[g])
+        total_effects.append(values[full] - values[empty])
+
+    mean_shapley = {g: float(np.mean(v)) for g, v in draws.items()}
+    std_shapley = {g: float(np.std(v)) for g, v in draws.items()}
+    return mean_shapley, std_shapley, float(np.mean(total_effects))
+
+
+def dataset_group_shapley(
+    model: nn.Module,
+    samples: list[dict],
+    n_baseline_draws: int,
+    device: torch.device,
+    min_known_residues: int = 5,
+    seed: int = 42,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Exact group-level Shapley attribution over the full test set.
+
+    Returns
+    -------
+    summary     : one row per feature group with mean/std Shapley value
+                  across proteins -- THIS is the cross-group comparable
+                  headline result.
+    per_protein : one row per protein with per-group Shapley values, useful
+                  as supplementary material / for checking consistency
+                  across the dataset.
+    """
+    model.eval()
+    rng = np.random.default_rng(seed)
+    rows = []
+    pbar = tqdm(list(enumerate(samples)), desc="Group Shapley", unit="prot")
+    for idx, sample in pbar:
+        if int(sample["known_mask"].sum()) < min_known_residues:
+            continue
+        mean_shapley, std_shapley, total_effect = protein_group_shapley(
+            model, sample, samples, idx, n_baseline_draws, device, rng
+        )
+        row = {"protein_id": sample["protein_id"], "total_effect": total_effect}
+        for g in GROUPS:
+            row[f"shapley_{g}"] = mean_shapley[g]
+            row[f"shapley_{g}_std_over_draws"] = std_shapley[g]
+        rows.append(row)
+
+    per_protein = pd.DataFrame(rows)
+
+    summary_rows = []
+    for g in GROUPS:
+        col = per_protein[f"shapley_{g}"]
+        summary_rows.append(
+            {
+                "feature_group": g,
+                "mean_shapley": float(col.mean()),
+                "std_shapley": float(col.std()),
+                "mean_abs_shapley": float(col.abs().mean()),
+                "n_proteins": len(per_protein),
+            }
+        )
+    summary = pd.DataFrame(summary_rows).sort_values("mean_abs_shapley", ascending=False)
+    return summary, per_protein
+
+
+# ============================================================================
+# 6. Per-protein DeepLiftShap attribution (within-group channel ranking)
 # ============================================================================
 
 
@@ -391,6 +666,10 @@ def compute_attributions(
     then unflatten the returned [1, D] attributions back to the original
     shape for aggregation.  The wrapper receives [B, D] (B=1+n_baselines)
     and calls .view(B, *model_shape) to restore the model-expected layout.
+
+    NOTE: the resulting feature_importance is only meaningful for ranking
+    channels WITHIN this feature_key. See section 8 (rescale_with_group_shapley)
+    for a cross-group comparable version.
 
     Returns
     -------
@@ -537,10 +816,10 @@ def compute_attributions(
     )
 
     dl_shap = DeepLiftShap(wrapper)
-    
+
     all_attrs = []
     n_bl = baseline_flat.shape[0]
-    
+
     try:
         for i in range(0, n_bl, baseline_batch_size):
             b_batch = baseline_flat[i : i + baseline_batch_size]
@@ -549,7 +828,7 @@ def compute_attributions(
                 baselines=b_batch,
             )
             all_attrs.append(a_batch * b_batch.shape[0])
-            
+
         attrs_flat = torch.cat(all_attrs, dim=0).sum(dim=0, keepdim=True) / n_bl
     except RuntimeError as exc:
         if "not have been used in the graph" in str(exc):
@@ -597,7 +876,7 @@ def compute_attributions(
 
 
 # ============================================================================
-# 6. Dataset-level aggregation
+# 7. Dataset-level aggregation (within-group channel ranking)
 # ============================================================================
 
 
@@ -622,6 +901,8 @@ def dataset_attribution(
     Returns a DataFrame sorted by mean_importance with columns:
         feature_group | feature_index | feature_name |
         mean_importance | std_importance | n_proteins
+
+    mean_importance is only comparable WITHIN a feature_group. See section 8.
     """
     records = []
 
@@ -738,13 +1019,52 @@ def dataset_attribution(
 
 
 # ============================================================================
-# 7. CLI
+# 8. Cross-group comparable channel ranking
+# ============================================================================
+#
+# The DeepLiftShap channel importances from section 7 are valid for ranking
+# channels WITHIN a group (e.g. which scalar feature matters most), since all
+# channels within a group share the same denominator / aggregation. To place
+# individual channels from DIFFERENT groups on the same scale, we redistribute
+# each group's exact Shapley value (section 5) across its channels using the
+# within-group DeepLiftShap distribution as relative weights. For channel j
+# in group g:
+#
+#   comparable_importance(g, j) =
+#       ( mean_importance(g, j) / sum_j' mean_importance(g, j') )
+#       * | mean_abs_shapley(g) |
+#
+# This keeps the within-group ranking exactly as computed by DeepLiftShap
+# (it's just a constant per-group rescaling), but now every channel's number
+# is expressed as a share of that group's Shapley contribution, so the
+# comparable_importance column can be sorted and compared across
+# x_scalar / x_local / x_pairwise channels directly.
+
+
+def rescale_with_group_shapley(
+    df_channels: pd.DataFrame, group_summary: pd.DataFrame
+) -> pd.DataFrame:
+    df = df_channels.copy()
+    scale = group_summary.set_index("feature_group")["mean_abs_shapley"].to_dict()
+    df["comparable_importance"] = 0.0
+    for g, scale_g in scale.items():
+        m = df["feature_group"] == g
+        group_total = df.loc[m, "mean_importance"].sum()
+        if group_total > 0:
+            df.loc[m, "comparable_importance"] = (
+                df.loc[m, "mean_importance"] / group_total
+            ) * scale_g
+    return df.sort_values("comparable_importance", ascending=False)
+
+
+# ============================================================================
+# 9. CLI
 # ============================================================================
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="DeepLiftShap feature attribution for BindCore",
+        description="DeepLiftShap + group-level Shapley feature attribution for BindCore",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("--model", required=True, help="Path to .pt checkpoint")
@@ -753,7 +1073,7 @@ def main() -> None:
     )
     parser.add_argument("--h5", required=True, help="Path to .h5 MD features file")
     parser.add_argument(
-        "--output", default="results/feature_importance.csv", help="Output CSV path"
+        "--output", default="results/feature_importance.csv", help="Output CSV path (within-group ranking, plus comparable_importance once group Shapley is computed)"
     )
     parser.add_argument(
         "--n_baselines",
@@ -810,12 +1130,32 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--skip_group_shapley",
+        action="store_true",
+        help="Skip the exact group-level Shapley computation (only run per-channel DeepLiftShap)",
+    )
+    parser.add_argument(
+        "--n_baseline_draws",
+        type=int,
+        default=20,
+        help="Number of randomly sampled reference proteins averaged over for the group-level Shapley values",
+    )
+    parser.add_argument(
+        "--group_shapley_output",
+        default="results/group_shapley.csv",
+        help="Output CSV for the group-level Shapley summary (cross-group comparable)",
+    )
+    parser.add_argument(
+        "--per_protein_shapley_output",
+        default="results/group_shapley_per_protein.csv",
+        help="Output CSV for per-protein group-level Shapley values",
+    )
+    parser.add_argument(
         "--debug",
         action="store_true",
         help="Print verbose debug information",
     )
     args = parser.parse_args()
-
 
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
@@ -862,7 +1202,7 @@ def main() -> None:
         if sub.empty:
             continue
         print(
-            f"\nTop features — {fkey} ({len(sub)} total, "
+            f"\nTop features (within-group only) — {fkey} ({len(sub)} total, "
             f"{sub['n_proteins'].iloc[0]} proteins):"
         )
         print(
@@ -871,6 +1211,39 @@ def main() -> None:
                 columns=["feature_name", "mean_importance", "std_importance"],
             )
         )
+
+    if not args.skip_group_shapley:
+        print("\n── Computing exact group-level Shapley values ──")
+        group_summary, per_protein_shapley = dataset_group_shapley(
+            model=model,
+            samples=samples,
+            n_baseline_draws=args.n_baseline_draws,
+            device=device,
+            min_known_residues=args.min_known,
+            seed=args.seed,
+        )
+
+        Path(args.group_shapley_output).parent.mkdir(parents=True, exist_ok=True)
+        group_summary.to_csv(args.group_shapley_output, index=False)
+        per_protein_shapley.to_csv(args.per_protein_shapley_output, index=False)
+        print(f"Saved -> {args.group_shapley_output}")
+        print(f"Saved -> {args.per_protein_shapley_output}")
+
+        print("\nGroup-level Shapley values (cross-group comparable):")
+        print(group_summary.to_string(index=False))
+
+        if not df.empty:
+            df = rescale_with_group_shapley(df, group_summary)
+            df.to_csv(args.output, index=False)
+            print(f"\nRe-saved {args.output} with added 'comparable_importance' column.")
+
+            print("\nTop 15 channels overall by comparable_importance (cross-group ranking):")
+            print(
+                df.head(15).to_string(
+                    index=False,
+                    columns=["feature_group", "feature_name", "comparable_importance", "mean_importance"],
+                )
+            )
 
 
 if __name__ == "__main__":

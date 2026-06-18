@@ -184,7 +184,7 @@ lip_preds = {
 }
 
 morf_preds = {
-    "AF-CALVADOS": parse_prediction_file("data/predictions/BindCORE_MoRF_AF_CALVADOS_test.csv"),
+    "IDPFold2": parse_prediction_file("data/predictions/BindCORE_MoRF_IDPFold2_test.csv"),
     "MoRFchibi": parse_prediction_file("data/predictions/MoRFchibi_test.csv"),
 }
 
@@ -225,7 +225,7 @@ _style_ax(ax1)
 
 # --- Panel 2: MoRF (BindCORE vs MoRFchibi) ---
 ax2 = axes[1]
-t_bc_morf, p_bc_morf = calculate_perf_curve(morf_labels, morf_scores, morf_lengths, "AF-CALVADOS")
+t_bc_morf, p_bc_morf = calculate_perf_curve(morf_labels, morf_scores, morf_lengths, "IDPFold2")
 t_sota_morf, p_sota_morf = calculate_perf_curve(morf_labels, morf_scores, morf_lengths, "MoRFchibi")
 
 x_grid_morf = np.linspace(min(t_bc_morf.min(), t_sota_morf.min()), max(t_bc_morf.max(), t_sota_morf.max()), 300)
