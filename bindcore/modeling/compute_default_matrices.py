@@ -1,13 +1,9 @@
 """
 Torch implementations of random-coil reference pairwise features.
-
-These matrices depend only on sequence length, device, and dtype, so the
-expensive pieces are cached and cloned before use in a forward pass.
 """
 
 from __future__ import annotations
 
-import functools
 import math
 from typing import Sequence, Union
 
@@ -16,12 +12,14 @@ import torch
 Device = Union[torch.device, str]
 
 
-@functools.lru_cache(maxsize=128)
-def _cached_distance_fluctuation(
-    size: int, device_str: str, dtype: torch.dtype
+def generate_random_coil_distance_fluctuation(
+    size: int,
+    device: Device = "cpu",
+    dtype: torch.dtype = torch.float32,
 ) -> torch.Tensor:
-    device = torch.device(device_str)
+    """GNM-based random-coil distance fluctuation matrix."""
     with torch.no_grad():
+        device = torch.device(device)
         idx = torch.arange(size, device=device)
         diff = (idx[:, None] - idx[None, :]).abs()
         mask = (diff >= 1) & (diff <= 2)
@@ -36,22 +34,16 @@ def _cached_distance_fluctuation(
     return df_matrix
 
 
-def generate_random_coil_distance_fluctuation(
+def generate_random_coil_contact_frequency(
     size: int,
+    cutoff: float = 8.0,
+    b: float = 3.8,
     device: Device = "cpu",
     dtype: torch.dtype = torch.float32,
 ) -> torch.Tensor:
-    """GNM-based random-coil distance fluctuation matrix."""
-    device_str = str(torch.device(device))
-    return _cached_distance_fluctuation(size, device_str, dtype).clone()
-
-
-@functools.lru_cache(maxsize=128)
-def _cached_contact_frequency(
-    size: int, cutoff: float, b: float, device_str: str, dtype: torch.dtype
-) -> torch.Tensor:
-    device = torch.device(device_str)
+    """Gaussian-chain contact probability matrix for a random coil."""
     with torch.no_grad():
+        device = torch.device(device)
         idx = torch.arange(size, device=device, dtype=dtype)
         i, j = torch.meshgrid(idx, idx, indexing="ij")
         k = (i - j).abs()
@@ -67,26 +59,17 @@ def _cached_contact_frequency(
     return frequency
 
 
-def generate_random_coil_contact_frequency(
+def rouse_correlation_matrix(
     size: int,
-    cutoff: float = 8.0,
-    b: float = 3.8,
     device: Device = "cpu",
     dtype: torch.dtype = torch.float32,
 ) -> torch.Tensor:
-    """Gaussian-chain contact probability matrix for a random coil."""
-    device_str = str(torch.device(device))
-    return _cached_contact_frequency(
-        size, float(cutoff), float(b), device_str, dtype
-    ).clone()
+    """Normalized Rouse-mode correlation matrix for a random coil."""
+    if size <= 1:
+        return torch.ones((size, size), device=device, dtype=dtype)
 
-
-@functools.lru_cache(maxsize=128)
-def _cached_rouse_correlation(
-    size: int, device_str: str, dtype: torch.dtype
-) -> torch.Tensor:
-    device = torch.device(device_str)
     with torch.no_grad():
+        device = torch.device(device)
         p = torch.arange(1, size, device=device, dtype=dtype)
         positions = torch.arange(size, device=device, dtype=dtype) + 0.5
 
@@ -101,19 +84,6 @@ def _cached_rouse_correlation(
         denom = torch.sqrt(torch.outer(diag, diag))
         corr_norm = corr / denom
     return corr_norm
-
-
-def rouse_correlation_matrix(
-    size: int,
-    device: Device = "cpu",
-    dtype: torch.dtype = torch.float32,
-) -> torch.Tensor:
-    """Normalized Rouse-mode correlation matrix for a random coil."""
-    if size <= 1:
-        return torch.ones((size, size), device=device, dtype=dtype)
-
-    device_str = str(torch.device(device))
-    return _cached_rouse_correlation(size, device_str, dtype).clone()
 
 
 def random_coil_pairwise_baseline(
@@ -139,6 +109,27 @@ def random_coil_pairwise_baseline(
         ),
         dim=0,
     )
+
+
+def _random_coil_baseline_for_feature(
+    feature_name: str,
+    size: int,
+    device: Device,
+    dtype: torch.dtype,
+    cutoff: float,
+    b: float,
+) -> torch.Tensor | None:
+    if feature_name == "dccm":
+        return rouse_correlation_matrix(size, device=device, dtype=dtype)
+    if feature_name in {"contact_map", "contact_frequency"}:
+        return generate_random_coil_contact_frequency(
+            size, cutoff=cutoff, b=b, device=device, dtype=dtype
+        )
+    if feature_name in {"distance_fluctuations", "distance_fluctuation"}:
+        return generate_random_coil_distance_fluctuation(
+            size, device=device, dtype=dtype
+        )
+    return None
 
 
 def subtract_random_coil_pairwise_baseline(
@@ -193,24 +184,21 @@ def subtract_random_coil_pairwise_baseline(
         if length <= 0:
             continue
 
-        baseline = random_coil_pairwise_baseline(
-            length, device=device, dtype=dtype, cutoff=cutoff, b=b
-        )
         batch_idx = lengths == length
         for channel in baseline_channels:
-            name = feature_names[channel]
-            if name == "dccm":
-                baseline_channel = 0
-            elif name in {"contact_map", "contact_frequency"}:
-                baseline_channel = 1
-            elif name in {"distance_fluctuations", "distance_fluctuation"}:
-                baseline_channel = 2
-            else:
+            baseline = _random_coil_baseline_for_feature(
+                feature_names[channel],
+                length,
+                device=device,
+                dtype=dtype,
+                cutoff=cutoff,
+                b=b,
+            )
+            if baseline is None:
                 continue
 
             out[batch_idx, channel, :length, :length] = (
-                out[batch_idx, channel, :length, :length]
-                - baseline[baseline_channel].unsqueeze(0)
+                out[batch_idx, channel, :length, :length] - baseline.unsqueeze(0)
             )
 
     if pairwise_mask is not None:
