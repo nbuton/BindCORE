@@ -206,6 +206,25 @@ class ScalarFeatureProjector(nn.Module):
         return protein_repr.unsqueeze(1).expand(-1, L, -1)
 
 
+class ProteinLengthProjector(nn.Module):
+    """Projects the mask-derived protein length as a global feature."""
+
+    def __init__(self, embed_dim: int, hidden_dim: int, max_seq_len: int, dropout: float):
+        super().__init__()
+        self.max_seq_len = max(1, max_seq_len)
+        self.mlp = MLP2(1, hidden_dim, embed_dim, dropout=dropout)
+
+    def normalize(self, protein_lengths: torch.Tensor) -> torch.Tensor:
+        protein_lengths = protein_lengths.to(dtype=torch.float32)
+        max_len = float(self.max_seq_len)
+        return torch.log1p(protein_lengths).div(math.log1p(max_len))
+
+    def forward(self, protein_lengths: torch.Tensor, L: int) -> torch.Tensor:
+        x = self.normalize(protein_lengths).unsqueeze(-1)
+        protein_repr = self.mlp(x)
+        return protein_repr.unsqueeze(1).expand(-1, L, -1)
+
+
 class PairwiseContextProjector(nn.Module):
     """
     Converts pairwise features into per-residue context vectors using
@@ -570,7 +589,7 @@ class TransformerBlock(nn.Module):
 
 
 class ClassificationHead(nn.Module):
-    """Maps pooled [B, E] representation to class logits."""
+    """Maps per-residue representations to class logits."""
 
     def __init__(self, embed_dim: int, num_classes: int, dropout: float = 0.1):
         super().__init__()
@@ -724,6 +743,12 @@ class ProteinMultiScaleTransformer(nn.Module):
             stats["scalar"]["means"],
             stats["scalar"]["stds"],
         )
+        self.length_proj = ProteinLengthProjector(
+            self.E,
+            cfg.scalar_mlp_hidden,
+            cfg.max_seq_len,
+            cfg.dropout,
+        )
         self.local_proj = LocalFeatureProjector(
             cfg.nb_local,
             self.E,
@@ -759,6 +784,13 @@ class ProteinMultiScaleTransformer(nn.Module):
 
         # ── Classification head ───────────────────────────────────────────
         self.head = ClassificationHead(self.E, cfg.num_classes, cfg.dropout)
+        self.length_head = nn.Sequential(
+            nn.LayerNorm(1),
+            nn.Linear(1, self.E),
+            nn.GELU(),
+            nn.Dropout(cfg.dropout),
+            nn.Linear(self.E, cfg.num_classes),
+        )
 
     def pair_dropout(self,x_pairwise: torch.Tensor, mask: torch.Tensor, rate: float, training: bool) -> torch.Tensor:
         if not training or rate <= 0:
@@ -777,14 +809,27 @@ class ProteinMultiScaleTransformer(nn.Module):
         plm_pad: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         B, L = tokens.shape
+        if mask is None:
+            mask_bool = torch.ones((B, L), dtype=torch.bool, device=tokens.device)
+            protein_lengths = torch.full(
+                (B,),
+                L,
+                dtype=torch.float32,
+                device=tokens.device,
+            )
+        else:
+            mask_bool = mask.to(device=tokens.device).bool()
+            protein_lengths = mask_bool.to(dtype=torch.float32).sum(dim=1)
+        mask_float = mask_bool.to(dtype=x_pairwise.dtype)
 
-        if mask is not None:
-            m = mask.float()
-            pairwise_mask = m.unsqueeze(1).unsqueeze(-1) * m.unsqueeze(1).unsqueeze(2)
-            x_pairwise = x_pairwise * pairwise_mask
+        pairwise_mask = (
+            mask_float.unsqueeze(1).unsqueeze(-1)
+            * mask_float.unsqueeze(1).unsqueeze(2)
+        )
+        x_pairwise = x_pairwise * pairwise_mask
 
         x_pairwise = subtract_random_coil_pairwise_baseline(
-            x_pairwise, self.pairwise_features, mask
+            x_pairwise, self.pairwise_features, mask_bool
         )
 
         x_pairwise_permute = x_pairwise.permute(0, 2, 3, 1)  # [B, L, L, C]
@@ -792,7 +837,12 @@ class ProteinMultiScaleTransformer(nn.Module):
         x_pairwise_scaled = x_pairwise_permute_scaled.permute(
             0, 3, 1, 2
         )  # [B, C, L, L]
-        x_pairwise_scaled = self.pair_dropout(x_pairwise_scaled, mask, self.cfg.pair_dropout_rate, self.training) 
+        x_pairwise_scaled = self.pair_dropout(
+            x_pairwise_scaled,
+            mask_bool,
+            self.cfg.pair_dropout_rate,
+            self.training,
+        )
 
         # 1. Build initial [B, L, E] embedding
         x = torch.zeros((B, L, self.E), device=tokens.device)
@@ -802,12 +852,13 @@ class ProteinMultiScaleTransformer(nn.Module):
 
         if self.use_scalar_features:
             x = x + self.scalar_proj(x_scalar, L)
+        x = x + self.length_proj(protein_lengths, L)
 
         if self.use_local_features:
             x = x + self.local_proj(x_local)
 
         if self.use_pairwise_features:
-            x = x + self.pairwise_init_proj(x_pairwise_scaled, mask)
+            x = x + self.pairwise_init_proj(x_pairwise_scaled, mask_bool)
 
         if self.use_plm_embedding:
             x = x + self.plm_proj(plm_pad)
@@ -817,13 +868,17 @@ class ProteinMultiScaleTransformer(nn.Module):
         # 2. Transformer blocks — x_pairwise evolves across blocks
         if self.share_block_weights:
             for _ in range(self.num_blocks):
-                x, x_pairwise_scaled = self.shared_block(x, x_pairwise_scaled, mask)
+                x, x_pairwise_scaled = self.shared_block(
+                    x, x_pairwise_scaled, mask_bool
+                )
         else:
             for block in self.blocks:
-                x, x_pairwise_scaled = block(x, x_pairwise_scaled, mask)
+                x, x_pairwise_scaled = block(x, x_pairwise_scaled, mask_bool)
 
         # 3. Classification head
-        return self.head(x)
+        length_head = self.length_proj.normalize(protein_lengths)
+        length_head = length_head.view(B, 1, 1).expand(-1, L, -1)
+        return self.head(x) + self.length_head(length_head.to(dtype=x.dtype))
 
 
 # ---------------------------------------------------------------------------
@@ -841,7 +896,21 @@ if __name__ == "__main__":
         num_heads=4,
         max_seq_len=512,
     )
-    model = ProteinMultiScaleTransformer(cfg)
+    stats = {
+        "scalar": {
+            "means": torch.zeros(cfg.nb_scalar),
+            "stds": torch.ones(cfg.nb_scalar),
+        },
+        "local": {
+            "means": torch.zeros(cfg.nb_local),
+            "stds": torch.ones(cfg.nb_local),
+        },
+        "pairwise": {
+            "means": torch.zeros(cfg.nb_pairwise),
+            "stds": torch.ones(cfg.nb_pairwise),
+        },
+    }
+    model = ProteinMultiScaleTransformer(cfg, stats)
 
     B, L = 2, 128
     tokens = torch.randint(1, 25, (B, L))
