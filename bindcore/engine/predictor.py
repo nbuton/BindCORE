@@ -46,9 +46,11 @@ def load_checkpoint(
     checkpoint : raw dict (contains cfg, stats, feature lists, best_threshold…)
     """
     checkpoint = torch.load(model_path, map_location=device, weights_only=False)
-    model = ProteinMultiScaleTransformer(checkpoint["cfg"], checkpoint["stats"]).to(
-        device
-    )
+    model = ProteinMultiScaleTransformer(
+        checkpoint["cfg"],
+        checkpoint["stats"],
+        pairwise_features=checkpoint.get("pairwise_features", []),
+    ).to(device)
     model.load_state_dict(checkpoint["model_state_dict"])
     model.eval()
     return model, checkpoint

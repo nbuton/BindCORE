@@ -15,13 +15,16 @@ through a series of CNN-biased Transformer blocks.
 from __future__ import annotations
 
 import math
-from typing import Optional
+from typing import Optional, Sequence
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 from bindcore.config import ProteinModelConfig
+from bindcore.modeling.compute_default_matrices import (
+    subtract_random_coil_pairwise_baseline,
+)
 
 # ---------------------------------------------------------------------------
 # 1.  Small reusable primitives
@@ -627,7 +630,12 @@ class ProteinMultiScaleTransformer(nn.Module):
     BindCORE: multi-scale protein representation model for binding prediction.
     """
 
-    def __init__(self, cfg: ProteinModelConfig, stats):
+    def __init__(
+        self,
+        cfg: ProteinModelConfig,
+        stats,
+        pairwise_features: Optional[Sequence[str]] = None,
+    ):
         super().__init__()
         self.cfg = cfg
         self.E = cfg.embed_dim
@@ -639,6 +647,7 @@ class ProteinMultiScaleTransformer(nn.Module):
         self.share_block_weights = (
             cfg.share_block_weights
         )  # Universal Transformer style
+        self.pairwise_features = list(pairwise_features or [])
 
         # ── Input embeddings ──────────────────────────────────────────────
         self.seq_emb = SequenceEmbedding(
@@ -716,6 +725,10 @@ class ProteinMultiScaleTransformer(nn.Module):
             m = mask.float()
             pairwise_mask = m.unsqueeze(1).unsqueeze(-1) * m.unsqueeze(1).unsqueeze(2)
             x_pairwise = x_pairwise * pairwise_mask
+
+        x_pairwise = subtract_random_coil_pairwise_baseline(
+            x_pairwise, self.pairwise_features, mask
+        )
 
         x_pairwise_permute = x_pairwise.permute(0, 2, 3, 1)  # [B, L, L, C]
         x_pairwise_permute_scaled = self.pair_wise_scaler(x_pairwise_permute)

@@ -203,9 +203,11 @@ class bindcore_Trainer:
         self.model_cfg.nb_local = len(self.train_cfg.LOCAL_FEATURES)
         self.model_cfg.nb_pairwise = len(self.train_cfg.PAIRWISE_FEATURES)
 
-        self.model = ProteinMultiScaleTransformer(self.model_cfg, self.stats).to(
-            self.device
-        )
+        self.model = ProteinMultiScaleTransformer(
+            self.model_cfg,
+            self.stats,
+            pairwise_features=self.train_cfg.PAIRWISE_FEATURES,
+        ).to(self.device)
         print(
             f"Model parameters: {sum(p.numel() for p in self.model.parameters()) / 1e6:.2f} M"
         )
