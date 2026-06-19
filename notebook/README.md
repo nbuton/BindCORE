@@ -38,14 +38,3 @@ First-run setup takes ~10–15 min; subsequent runs reuse it. A CUDA PyTorch bui
 is strongly recommended (IDPFold2 is slow on CPU; cg2all backmapping is CPU-only
 by design).
 
-## Notes
-
-- **cg2all is isolated on purpose.** It needs torch 2.3 + DGL + a patched
-  `mdtraj` that would clobber the analysis stack, so it lives in its own env
-  (conda on macOS, `uv venv` on Linux) and exchanges only PDB/DCD files.
-- Both checkpoints (`models/BindCORE_{LIP,MoRF}_IDPFold2/bindCORE.pt`) are
-  self-contained — config, feature stats, feature lists and calibrated
-  threshold included, PLM stream disabled — so no ESM-3 embeddings are needed.
-- To rebuild the environment, delete `bindcore_studio/.bindcore_setup_done`
-  (and `bindcore_studio/cg2all_env`) and re-run the cell.
-- The `bindcore_studio/` working directory is created at runtime and is git-ignored.

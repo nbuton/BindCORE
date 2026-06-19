@@ -1,238 +1,161 @@
-# BindCORE
+# BindCORE: Biophysical Ensemble Learning for Predicting Interaction Sites in Intrinsically Disordered Regions
 
-**CO**nformational **R**epresentation **E**nsemble for **L**inear **I**nteraction **P**eptide prediction
+This repository contains the official implementation of **BindCORE**, an ensemble-aware deep learning framework designed to predict interaction sites (LIPs and MoRFs) within Intrinsically Disordered Regions (IDRs) by integrating global, local, and pairwise biophysical descriptors.
 
-BindCORE predicts LIP propensity from an ensemble of protein conformations.
-It takes full atom ensemble of conformation as input, computes
-structural and dynamical features, and feeds them into a multi-scale Transformer
-(`ProteinMultiScaleTransformer`) that jointly exploits sequence, per-residue local,
-global scalar, and pairwise conformational signals.
+### Citation & Paper Metadata
 
----
-
-## Project layout
-
-```
-BindCORE/
-├── bindcore/                         # Core Library
-│   ├── config.py                     # Pydantic configuration schemas
-│   ├── data/                         # Data handling & Pre-processing
-│   │   ├── datasets.py               # PyTorch Dataset & Collation
-│   │   ├── io.py                     # I/O, Parsing (Truth/CSV)
-│   │   ├── properties_extraction.py  # Feature extraction
-│   │   └── features.py               # Canonical feature name definitions
-│   ├── modeling/                     # Neural Network Architecture
-│   │   ├── transformer.py            # ProteinMultiScaleTransformer
-│   │   └── loss.py                   # FocalLoss implementation
-│   ├── engine/                       # Execution Logic
-│   │   ├── trainer.py                # Training loops & gradient utilities
-│   │   └── predictor.py              # Inference wrappers & checkpoint loading
-│   └── eval/                         # Statistics & Visualization
-│       ├── metrics.py                # AUC, MCC, and thresholding logic
-│       ├── plotting.py               # Publication-ready figure generation
-│       └── structures.py             # ResidueExample tracking objects
-│
-├── scripts/                          # End-to-end pipeline (run in order)
-│   ├── compute_properties.py         # 1 – Extract conformational structure set features → HDF5
-│   ├── visualize_features.py         # 2 – Compare LIP / non-LIP feature distributions
-│   ├── train.py                      # 3 – Train the model
-│   ├── predict.py                    # 4 – Generate per-residue predictions
-│   └── evaluate.py                   # 5 – Benchmark against previous other models
-│
-├── data/
-│   ├── CLIP_dataset/          # TR1000.txt, TE440.txt (and *_max_1024.txt after filtering)
-│   ├── conformational_ensemble/  # Per-protein folders with DCD/PDB trajectories
-│   ├── properties/  # Output of compute_properties.py
-│   ├── models/                # Saved model checkpoints
-│   └── predictions/           # CSV files from predict.py
-│
-├── results/                   # Figures and evaluation outputs
-├── requirements.txt
-└── README.md
-```
+> **Preprint / Under Review** (2026)
+> *Briefings in Bioinformatics*, 2026, pp. 1–14
+> **Authors:** Nicolas Buton, Luiz Felipe Piochi, and Hamed Khakzad
+> **DOI:** *Added during production*
 
 ---
 
-## Installation
+## 🚀 Quick Start: Run BindCORE Immediately
 
-```bash
-git clone https://github.com/nbuton/BindCORE
-pip install -r requirements.txt
-pip install -e .          # installs bindcore as an editable package
-```
+To make BindCORE accessible to everyone, you can run predictions directly from an amino acid sequence without any manual biophysical feature preparation. The tools below automatically generate the required conformational ensembles for you.
 
----
+### Option A: Google Colab (Zero Setup — Recommended)
 
-##  Using BindCORE as a Prediction Tool
+The absolute fastest way to test BindCORE using a free cloud GPU. Environment setup, dependencies, and model weights are handled completely automatically in your browser.
 
-We provide three ways to run BindCORE: a "zero-setup" cloud notebook, an
-interactive notebook for your own machine, and a high-throughput local pipeline.
-Both notebooks predict **LIP & MoRF directly from a sequence** (they generate the
-conformational ensemble for you); see [`colab/README.md`](colab/README.md) for details.
-
-### Option A: Google Colab (Recommended for single sequences)
-For a quick prediction without local installation, use our managed notebook. It handles environment setup and dependencies automatically.
-> [!TIP]
-> **[Open in Colab](https://colab.research.google.com/github/nbuton/BindCORE/blob/main/colab/BindCORE_Colab.ipynb)** — Input your sequence and click **Runtime > Run All**.
-
----
+* **[Open in Colab](https://colab.research.google.com/github/nbuton/BindCORE/blob/main/colab/BindCORE_Colab.ipynb)**: Just input your protein sequence and click **Runtime > Run All**.
 
 ### Option B: Local Interactive Notebook
-Run the same studio in Jupyter on your own machine (CPU or CUDA) — input a sequence
-and get per-residue LIP & MoRF predictions, no precomputed ensembles required.
 
+Run the same interactive prediction studio locally on your workstation or cluster (CPU or CUDA supported).
+
+* **Automated Setup:** The first cell auto-locates the repository, handles isolation dependencies with `uv`, downloads the IDPFold2 weights, and builds `cg2all` (initial setup takes ~10–15 min; subsequent runs are instant).
+* **Execution:**
 ```bash
-# from inside your BindCORE checkout
+# From inside your cloned BindCORE repository
 jupyter lab colab/BindCORE_Local.ipynb
 ```
 
-The first cell auto-locates the repo, installs dependencies with `uv`, downloads the
-IDPFold2 weights, and builds `cg2all` in an isolated environment (first-run setup
-~10–15 min; subsequent runs reuse it). A CUDA PyTorch build is strongly recommended.
+
 
 ---
 
-### Option C: Local Production Pipeline
-Use this for large-scale datasets or custom workflows. This pipeline requires pre-generated conformational ensembles.
+## 📖 Abstract
 
-#### 1. Generate Conformational Ensembles
-BindCORE predicts based on structural dynamics. You must first generate full-atom ensembles:
-* **Fold:** Generate coarse-grained ensembles using [IDPFold2](https://github.com/Junjie-Zhu/IDPFold2).
-* **Backmap:** Convert to full-atom resolution using `cg2all` (refer to the script in the IDPFold2 repository).
-* **Organize:** Place the output in `data/conformational_ensemble/IDPFold2/`. 
+Intrinsically disordered proteins and regions (IDPs/IDRs) mediate diverse cellular functions through binding segments whose functional properties are encoded in dynamic conformational ensembles rather than a single static state. Existing predictors of linear interacting peptides (LIPs) and molecular recognition features (MoRFs) rely primarily on sequence-derived features, leaving ensemble-level biophysical properties largely unexplored.
 
-**Required Directory Structure:**
-```text
-data/conformational_ensemble/IDPFold2/
-└── [Protein_ID]/
-    ├── top_AA.pdb   # All-atom topology
-    └── traj_AA.xtc  # All-atom trajectory
+**BindCORE** bridges this gap by integrating global, local, and pairwise biophysical descriptors processed through a multi-scale architecture to predict interaction sites within IDRs. Across established benchmarks, BindCORE consistently improves average precision, ROC-AUC, and Matthews correlation over sequence-based baselines. Feature-attribution analyses reveal that pairwise descriptors are the dominant contributors to prediction, alongside complementary signals from solvent accessibility, backbone dihedral entropy, and global geometric properties.
+
+---
+
+## ✨ Key Features
+
+* **Ensemble-Aware Architecture:** Integrates dynamic structural properties rather than relying solely on static or sequence-only features.
+* **Multi-Scale Descriptors:** Leverages global geometric properties, local residues, and pairwise spatial relationships.
+* **Interpretable Predictions:** Built-in support for feature attribution mapping via DeepLIFT-SHAP exposes the exact biophysical signals driving interaction-site propensity.
+
+---
+
+## 🛠️ Repository Setup
+
+To install the framework locally for custom workflows or replication, clone the repository from GitLab:
+
+```bash
+git clone https://gitlab.inria.fr/nbuton/BindCORE
+cd BindCORE
 ```
 
-#### 2. Run Production Inference
-Once your ensembles are ready, run the unified production script. This script handles property computation and LIP prediction in one go:
+Core environment dependencies are listed in `requirements.txt` and primarily include `torch`, `h5py`, `numpy`, `pandas`, `scikit-learn`, `matplotlib`, `scipy`, `mdtraj`, and `tqdm`.
+
+---
+
+## ⚙️ High-Throughput Production Pipeline
+
+Use this option for large-scale datasets or custom workflows where you provide your own pre-generated structural trajectories.
+
+### 1. Generate & Organize Conformational Ensembles
+
+BindCORE predicts based on structural dynamics, requiring full-atom ensembles:
+
+* **Fold:** Generate coarse-grained ensembles using [IDPFold2](https://github.com/Junjie-Zhu/IDPFold2).
+* **Backmap:** Convert them to full-atom resolution using `cg2all`.
+* **Path Structure:** Place outputs into `data/conformational_ensemble/IDPFold2/[Protein_ID]/` containing both the topology (`top_AA.pdb`) and trajectory (`traj_AA.xtc`) files.
+
+### 2. Run Production Inference
 
 ```bash
 python scripts/train.py \
-    --config  data/models/bindcore_IDPFold2/config.yaml \
+    --config data/models/bindcore_IDPFold2/config.yaml \
     --device cuda
 ```
 
 ---
 
-## Paper Reproduction Workflow
-### 0 - Preliminary Data Acquisition (Optional)
+## 🧬 Model Architecture & Features
 
-If you wish to replicate the specific examples discussed in the paper, please download the full-atom conformational ensembles and other data from Zenodo:
-https://zenodo.org/records/xxxxxxx and place them into the data/ folder
+The `ProteinMultiScaleTransformer` fuses four distinct input streams into a single embedding space, processed via Transformer blocks with a **PairwiseCNN** and **BiasedMultiHeadAttention**.
 
-### 1 — Compute conformational properties with EnsembleMDP library
+| Input Stream | Shape | Encoding Strategy |
+| --- | --- | --- |
+| **Amino-acid sequence** | `[B, L]` | Learned embedding + sinusoidal positional encoding |
+| **Local (per-residue)** | `[B, nb_local, L]` | 2-layer MLP projection |
+| **Scalar (per-protein)** | `[B, nb_scalar]` | 2-layer MLP → broadcast to sequence length |
+| **Pairwise** | `[B, nb_pairwise, L, L]` | Windowed row extraction + MLP |
 
-```bash
-python scripts/compute_properties.py \
-    --input_dir  data/conformational_ensemble/[CONFORMATION_ORIGIN]/ \
-    --workers    15
-```
+### Biophysical Feature Space
 
-- CONFORMATION_ORIGIN can be IDPFold2 / CALVADOS3 or even STARLING   
-- The output will be inside data/properties/[CONFORMATION_ORIGIN]_derived_properties.h5
-
-
-### 2 — Visualise feature distributions
-
-```bash
-python scripts/visualize_features.py \
-    --dataset  data/CLIP_dataset/TR1000_less_than_1024.txt \
-    --h5       data/properties/IDPFold2_derived_properties.h5 \
-    --output   results/feature_comparison_violin.pdf
-```
-This create a violin plot with all the features with the name results/{dataset_stem}_{h5_stem}_feature_comparison_violin.pdf
-
-### 3 — Train the model
-
-```bash
-python scripts/train.py \
-    --config  data/models/bindcore_IDPFold2/config.yaml \
-    --device mps
-```
-
-### 4 — Make predictions
-
-```bash
-─ python scripts/predict.py \
-    --model     data/models/bindcore_IDPFold2/bindcore.pt \
-    --h5        data/properties/IDPFold2_derived_properties.h5 \
-    --datasets  data/CLIP_dataset/TE440_less_than_1024.txt \
-    --output_dir data/predictions/
-```
-
-### 5 — Evaluate
-
-```bash
-python scripts/evaluate.py \
-    --test_truth  data/CLIP_dataset/TE440_less_than_1024.txt \
-    --pred_files  data/predictions/bindcore_TE440_less_than_1024.csv \
-                  data/predictions/CLIP_TE440.csv \
-                  data/predictions/MoRFchibi_TE440.csv \
-    --names       "BindCORE IDPFold2" "CLIP" "MoRFchibi V2.0" \
-    --output_dir  results/
-```
-
-### 6 - Interpretability
-
-```bash
-python scripts/run_interpretability.py \
-  --model data/models/bindcore_IDPFold2/bindcore.pt \
-  --config data/models/bindcore_IDPFold2/config.yaml \
-  --h5 data/properties/IDPFold2_derived_properties.h5 \
-  --plm-h5 data/embeddings/esm3-large-2024-03_merged.h5 \
-  --datasets data/CLIP_dataset/TR1000_in_h5.txt \
-  --output-dir data/interpretability/
-```
-
+* **Scalar (Global):** Asphericity, radius of gyration, end-to-end distance, shape anisotropy metrics, gyration eigenvalues, and scaling exponent.
+* **Local:** $\phi/\psi$ dihedral entropies, absolute/relative SASA (mean & std), and secondary structure propensities.
+* **Pairwise:** Dynamic cross-correlation matrix (DCCM), ensemble-averaged contact map, and distance fluctuation matrix.
 
 ---
 
-## Model architecture
+## 📊 Replicating Paper Experiments & Figures
 
-`ProteinMultiScaleTransformer` fuses four input streams:
+Execute the bash pipeline sequentially to fully replicate the published experimental findings:
 
-| Stream | Shape | Encoding |
-|---|---|---|
-| Amino-acid sequence | `[B, L]` | Learned embedding + sinusoidal positional encoding |
-| Local (per-residue) | `[B, nb_local, L]` | 2-layer MLP projection |
-| Scalar (per-protein) | `[B, nb_scalar]` | 2-layer MLP → broadcast to `[B, L, E]` |
-| Pairwise | `[B, nb_pairwise, L, L]` | Windowed row extraction + MLP |
+1. **Hyperparameter Tuning:** Run Tree-structured Parzen Estimators (TPE) optimization across 100 runs.
+```bash
+bash bash_pipeline/hyperparam_tuning.sh
+```
 
-These are summed into a single `[B, L, E]` embedding and passed through
-`num_blocks` Transformer blocks.  Each block contains:
-1. **PairwiseCNN** — multi-scale dilated 2D CNN producing per-head attention bias
-2. **BiasedMultiHeadAttention** — standard MHA with learnable pairwise gating
-3. **FeedForwardNetwork** — position-wise FFN with GELU
 
-After the last block, masked mean pooling collapses the sequence dimension and
-a linear classification head outputs class logits.
+2. **Model Training:** Move the optimal configuration file generated by TPE into `data/models/[model_flavor]/` and train the models.
+```bash
+bash bash_pipeline/training.sh
+```
 
----
 
-## Features
+3. **Inference & Evaluation:** Compute metrics on the test dataset (saved to `data/predictions/`).
+```bash
+bash bash_pipeline/predictions.sh
+```
 
-### Scalar (per-protein, from conformational ensemble)
-Asphericity, radius of gyration, end-to-end distance, shape anisotropy metrics,
-gyration eigenvalues, scaling exponent, etc.
 
-### Local (per-residue)
-φ/ψ dihedral entropies, absolute/relative SASA (mean & std), secondary
-structure propensities (H, G, I, E, B, T, S, C).
+4. **Feature Attribution:** Generate standardized DeepLIFT-SHAP importance scores (saved to `data/interpretability/`).
+```bash
+bash bash_pipeline/interpretability.sh
+```
 
-### Pairwise
-Dynamic cross-correlation matrix (DCCM), ensemble-averaged contact map,
-distance fluctuation matrix.
+
+5. **Replicate Figures:** Run the individual scripts inside `figures_code/` (e.g., curves, importance plots, and graphical abstracts) utilizing the outputs generated in steps 3 and 4.
 
 ---
 
-## Dependencies
+## 📁 Project Layout
 
-See `requirements.txt`. Key libraries: `torch`, `h5py`, `numpy`, `pandas`,
-`scikit-learn`, `matplotlib`, `scipy`, `mdtraj`, `tqdm`.
-The `idpmdp` package (for `ProteinAnalyzer`) is required for Step 1 only.
+```text
+BindCORE/
+├── analysis/                         # Downstream analysis notebooks & scripts
+├── bindcore/                         # Core Library (Data, Engine, Eval, Modeling)
+│   ├── config.py                     # Pydantic configuration schemas
+│   ├── data/                         # Data handling & Pre-processing
+│   ├── engine/                       # Execution Logic (trainer, predictor, attribution)
+│   ├── eval/                         # Evaluation & Metrics
+│   └── modeling/                     # Neural Network Architecture
+├── data/                             # Raw data, datasets, predictions, and properties
+├── figures_code/                     # Scripts to generate publication-ready plots
+├── results/                          # Generated figures, curves, and summary CSVs
+├── scripts/                          # End-to-end execution pipeline (train, evaluate, etc.)
+├── tests/                            # Unit tests
+├── README.md                         # Project documentation
+├── requirements.txt                  # Environment dependencies
+└── setup.py                          # Package installation configuration
+
+```

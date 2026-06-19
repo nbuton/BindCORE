@@ -14,7 +14,6 @@ figures/*
 results_cg/*
 results_ensemble/*
 env_CORE_LIP/*
-*.sh
 *.stdout
 *.stderr
 *.pdf
