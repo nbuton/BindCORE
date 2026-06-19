@@ -8,11 +8,9 @@ import os
 import sys
 import ctypes
 import shutil
-import logging
 import warnings
 from pathlib import Path
 from typing import Union
-from pathlib import Path
 import h5py
 import mdtraj as md
 import numpy as np
@@ -70,7 +68,11 @@ def convert_trajectory_format(folder_path: Path) -> None:
 
 
 def process_single_protein(
-    protein_dir: Path, pdb_name: str, xtc_name: str, convert_dcd: bool = False,n_subsample_trajectory:int = -1
+    protein_dir: Path,
+    pdb_name: str,
+    xtc_name: str,
+    convert_dcd: bool = False,
+    n_subsample_trajectory: int = -1,
 ) -> tuple[str, dict]:
     """
     Worker function: Handles conversion and feature extraction for one protein.
@@ -103,7 +105,9 @@ def process_single_protein(
 
     # 3. Compute properties using your ProteinAnalyzer
     try:
-        analyzer = ProteinAnalyzer(pdb_path, xtc_path,n_subsample_trajectory=n_subsample_trajectory)
+        analyzer = ProteinAnalyzer(
+            pdb_path, xtc_path, n_subsample_trajectory=n_subsample_trajectory
+        )
         properties = analyzer.compute_all(
             sasa_n_sphere=960,
             contact_cutoff=8.0,
@@ -143,8 +147,6 @@ def save_properties_to_h5(
 
                 # Check if the dataset already exists in the group
                 if name in grp:
-                    # HDF5 datasets cannot be resized/overwritten easily if shapes differ.
-                    # Usually, it's safest to delete and recreate if you want to update.
                     del grp[name]
 
                 # Create the dataset

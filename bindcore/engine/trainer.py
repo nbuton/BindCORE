@@ -13,21 +13,18 @@ from __future__ import annotations
 import math
 import os
 from pathlib import Path
-os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
 import random
 
 import h5py
-from matplotlib import pyplot as plt
+import yaml
 import numpy as np
+import pandas as pd
+from tqdm import tqdm
+from matplotlib import pyplot as plt
 import torch
 from torch import nn
-import yaml
-from tqdm import tqdm
-import pandas as pd
 from torch.utils.data import DataLoader, Subset
 from torch.optim.lr_scheduler import SequentialLR, LinearLR, CosineAnnealingLR
-
-# from popriskmin import PRM
 
 from bindcore.config import FullConfig
 from bindcore.data.datasets import ProteinDataset, collate_proteins
@@ -77,13 +74,20 @@ def get_config(yaml_path: str) -> FullConfig:
 
 
 class bindcore_Trainer:
-    def __init__(self, cfg, config_path, threshold_selection=True, model_saving=True, device="cpu"):
+    def __init__(
+        self,
+        cfg,
+        config_path,
+        threshold_selection=True,
+        model_saving=True,
+        device="cpu",
+    ):
         self.cfg = cfg
         self.train_cfg = cfg.training
         self.model_cfg = cfg.model
         self.device = torch.device(device)
         self.threshold_selection = threshold_selection
-        self.model_saving=model_saving
+        self.model_saving = model_saving
 
         # Paths
         self.config_dir = os.path.dirname(os.path.abspath(config_path))
@@ -118,7 +122,9 @@ class bindcore_Trainer:
             )
 
         project_root = Path(__file__).resolve().parent.parent.parent
-        plm_h5_path = os.path.join(project_root, "data/embeddings/esm3-large-2024-03_merged.h5")
+        plm_h5_path = os.path.join(
+            project_root, "data/embeddings/esm3-large-2024-03_merged.h5"
+        )
         self.dataset = ProteinDataset(
             X_scalar,
             X_local,
@@ -126,11 +132,7 @@ class bindcore_Trainer:
             seqs,
             y_list,
             ids=ids,
-            plm_h5_path=(
-                plm_h5_path
-                if self.model_cfg.use_plm_embedding
-                else None
-            ),
+            plm_h5_path=(plm_h5_path if self.model_cfg.use_plm_embedding else None),
         )
         self.stats = get_all_feature_stats(X_scalar, X_local, X_pairwise)
         self.y_list = y_list  # Keep for loss weight calculation
@@ -147,7 +149,9 @@ class bindcore_Trainer:
             id_to_idx = {pid: i for i, pid in enumerate(ids)}
 
             project_root = Path(__file__).resolve().parent.parent.parent
-            mmseq2_cached_cluster = os.path.join(project_root, "data/mmseqs2_cluster.yaml")
+            mmseq2_cached_cluster = os.path.join(
+                project_root, "data/mmseqs2_cluster.yaml"
+            )
             cluster_dict = cluster_sequences_mmseqs2(
                 seq_df, output_file=mmseq2_cached_cluster, seq_identity=0.3
             )
@@ -158,7 +162,7 @@ class bindcore_Trainer:
             rng.shuffle(all_clusters)
 
             n_val_clusters = int(val_prop * len(all_clusters))
-            
+
             val_clusters = all_clusters[:n_val_clusters]
             train_clusters = all_clusters[n_val_clusters:]
 
@@ -271,15 +275,6 @@ class bindcore_Trainer:
                 lr=self.train_cfg.lr,
                 weight_decay=self.train_cfg.weight_decay,
             )
-        # elif self.train_cfg.optimizer == "PRM":
-        #     self.optimizer = PRM(
-        #         self.model.parameters(),
-        #         lr=self.train_cfg.lr,
-        #         weight_decay=self.train_cfg.weight_decay,
-        #         softness=1.0,
-        #         warmup_steps=32,
-        #         rho=0.99,
-        #     )
         else:
             raise ValueError(f"Unknown {self.train_cfg.optimizer} optimizer type")
 
@@ -521,9 +516,6 @@ class bindcore_Trainer:
                 scheduler.step()
                 if self.train_cfg.use_ema:
                     self._ema_update()
-            # For debug
-            # if isinstance(optimizer, PRM) and batch_idx % 10 == 0:
-            #     print("Active fraction:", optimizer.get_mask_stats()["active_fraction"])
 
             # Undo the accumulation scaling to track the true loss magnitude
             total_loss += loss.item() * accumulation_steps * y.size(0)

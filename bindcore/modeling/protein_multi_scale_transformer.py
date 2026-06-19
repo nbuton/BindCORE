@@ -416,7 +416,7 @@ class PairwiseCNN(nn.Module):
       1) Depthwise conv — independent spatial processing per input channel
       2) Parallel dilated conv branches
       3) Concatenate + GroupNorm + GELU
-      4) 1×1 conv to num_heads
+      4) 1x1 conv to num_heads
 
     If dilations=[], the spatial CNN is skipped and a 1x1 projection is applied.
     """
@@ -523,9 +523,9 @@ class BiasedMultiHeadAttention(nn.Module):
     """
     Multi-head self-attention with an additive per-head pairwise bias.
 
-    Each head has a learnable scalar gate (α_h) controlling how much the
+    Each head has a learnable scalar gate (alpha_h) controlling how much the
     pairwise bias contributes:
-        logits_h = QKᵀ / √d + α_h · bias_h
+        logits_h = QKᵀ / √d + alpha_h · bias_h
 
     x:    [B, L, E]
     bias: [B, num_heads, L, L]
@@ -552,7 +552,6 @@ class BiasedMultiHeadAttention(nn.Module):
         self.out_proj = nn.Linear(embed_dim, embed_dim)
 
         # One learnable gate per head
-        # self.bias_gate = nn.Parameter(torch.ones(num_heads) * 0.5)
         self.bias_gate = nn.Parameter(torch.zeros(num_heads))
         self.activate_bias = activate_bias
         self.activate_classical_attention = activate_classical_attention
@@ -987,49 +986,3 @@ class ProteinMultiScaleTransformer(nn.Module):
         # 3. Classification head
         logits = self.head(x)
         return logits * mask_bool.unsqueeze(-1).to(dtype=logits.dtype)
-
-
-# ---------------------------------------------------------------------------
-# 6.  Quick smoke-test
-# ---------------------------------------------------------------------------
-
-if __name__ == "__main__":
-    cfg = ProteinModelConfig(
-        vocab_size=25,
-        nb_scalar=16,
-        nb_local=32,
-        nb_pairwise=8,
-        embed_dim=64,
-        num_blocks=2,
-        num_heads=4,
-        max_seq_len=512,
-    )
-    stats = {
-        "scalar": {
-            "means": torch.zeros(cfg.nb_scalar),
-            "stds": torch.ones(cfg.nb_scalar),
-        },
-        "local": {
-            "means": torch.zeros(cfg.nb_local),
-            "stds": torch.ones(cfg.nb_local),
-        },
-        "pairwise": {
-            "means": torch.zeros(cfg.nb_pairwise),
-            "stds": torch.ones(cfg.nb_pairwise),
-        },
-    }
-    model = ProteinMultiScaleTransformer(cfg, stats)
-
-    B, L = 2, 128
-    tokens = torch.randint(1, 25, (B, L))
-    x_scalar = torch.randn(B, cfg.nb_scalar)
-    x_local = torch.randn(B, cfg.nb_local, L)
-    x_pairwise = torch.randn(B, cfg.nb_pairwise, L, L)
-    mask = torch.ones(B, L)
-    mask[0, 40:] = 0
-    plm_pad = None
-
-    logits = model(tokens, x_scalar, x_local, x_pairwise, mask, plm_pad)
-    print("Output shape:", logits.shape)  # expect [2, 2]
-    n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"Trainable parameters: {n_params:,}")

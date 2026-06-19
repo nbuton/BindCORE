@@ -53,7 +53,7 @@ class ProteinDataset(Dataset):
         seq_enc_list: list[np.ndarray],
         labels: Optional[list[np.ndarray]] = None,
         ids: Optional[list[str]] = None,
-        plm_h5_path: Optional[str] = None,  # New option
+        plm_h5_path: Optional[str] = None,
     ) -> None:
         if labels is None and ids is None:
             raise ValueError(
