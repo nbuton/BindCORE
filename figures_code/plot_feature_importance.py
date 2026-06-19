@@ -173,6 +173,7 @@ def load_all() -> dict[tuple[str, str], pd.DataFrame]:
                 / "feature_importance.csv"
             )
             data[(task, ens)] = pd.read_csv(p)
+            data[(task, ens)]["std_importance"]=0.0
     return data
 
 
@@ -185,7 +186,7 @@ def top_features(
     result: dict[str, list[str]] = {}
     for grp in GROUPS:
         sub = all_df[all_df["feature_group"] == grp]
-        mean_across = sub.groupby("feature_name")["mean_importance"].mean()
+        mean_across = sub.groupby("feature_name")["comparable_importance"].mean()
         n = min(TOP_N[grp], len(mean_across))
         result[grp] = mean_across.nlargest(n).index.tolist()
     return result
@@ -202,7 +203,7 @@ def spearman_matrix(
     vecs: dict[str, dict[str, float]] = {}
     for ens in ENSEMBLES:
         df = data[(task, ens)]
-        vecs[ens] = dict(zip(df["feature_name"], df["mean_importance"]))
+        vecs[ens] = dict(zip(df["feature_name"], df["comparable_importance"]))
 
     common: list[str] = sorted(
         set.intersection(*[set(v.keys()) for v in vecs.values()])
@@ -255,7 +256,7 @@ def _draw_bar_panel(
                 means.append(0.0)
                 stds.append(0.0)
             else:
-                means.append(float(row["mean_importance"].iloc[0]))
+                means.append(float(row["comparable_importance"].iloc[0]))
                 stds.append(float(row["std_importance"].iloc[0]))
 
         ax.barh(
