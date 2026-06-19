@@ -1,4 +1,5 @@
 import os
+
 os.environ["HDF5_USE_FILE_LOCKING"] = "FALSE"
 
 import argparse
@@ -7,7 +8,7 @@ import concurrent.futures
 from pathlib import Path
 import h5py
 from tqdm import tqdm
-from filelock import FileLock 
+from filelock import FileLock
 
 from bindcore.data.properties_extraction import (
     process_single_protein,
@@ -20,44 +21,61 @@ def parse_args():
         description="Compute conformational MD properties with dynamic file resolution."
     )
     parser.add_argument(
-        "--input_dir", type=Path, required=True,
+        "--input_dir",
+        type=Path,
+        required=True,
         help="Directory containing protein subfolders.",
     )
     parser.add_argument(
-        "--workers", type=int, default=15,
+        "--workers",
+        type=int,
+        default=15,
         help="Number of parallel processes.",
     )
     parser.add_argument(
-        "--pdb_name", type=str, default="_allatom.pdb",
+        "--pdb_name",
+        type=str,
+        default="_allatom.pdb",
         help="Full filename or suffix (if --dynamic is used).",
     )
     parser.add_argument(
-        "--xtc_name", type=str, default="_allatom.xtc",
+        "--xtc_name",
+        type=str,
+        default="_allatom.xtc",
         help="Full filename or suffix (if --dynamic is used).",
     )
     parser.add_argument(
-        "--dynamic", action="store_true",
+        "--dynamic",
+        action="store_true",
         help="Prepend folder name (Protein ID) to pdb/xtc arguments.",
     )
     parser.add_argument(
-        "--convert_dcd", action="store_true",
+        "--convert_dcd",
+        action="store_true",
         help="If XTC is missing, look for DCD and convert it.",
     )
     parser.add_argument(
-        "--n_subsample_trajectory", type=int, default=-1,
+        "--n_subsample_trajectory",
+        type=int,
+        default=-1,
         help="Number of trajectory frames to use. -1 means all.",
     )
     parser.add_argument(
-        "--job_index", type=int, default=0,
+        "--job_index",
+        type=int,
+        default=0,
         help="0-based index of this job within the OAR array (default: 0).",
     )
     parser.add_argument(
-        "--n_jobs", type=int, default=1,
+        "--n_jobs",
+        type=int,
+        default=1,
         help="Total number of jobs in the OAR array. Directories are sharded "
-             "across jobs via modulo so each job processes a non-overlapping subset.",
+        "across jobs via modulo so each job processes a non-overlapping subset.",
     )
     parser.add_argument(
-        "--debug", action="store_true",
+        "--debug",
+        action="store_true",
     )
     return parser.parse_args()
 
@@ -77,8 +95,15 @@ def submit_kwargs(d: Path, pdb: str, xtc: str, args) -> dict:
     )
 
 
-def get_output_path(input_dir: Path) -> Path:
-    return Path("data/properties/") / f"{input_dir.stem}_derived_properties.h5"
+def get_output_path(input_dir: Path, num_subsample: int = -1) -> Path:
+    # Base name from the input directory
+    file_name = f"{input_dir.stem}_derived_properties"
+
+    # Append the subsample count if it's explicitly set
+    if num_subsample != -1:
+        file_name += f"_subsample_{num_subsample}"
+
+    return Path("data/properties/") / f"{file_name}.h5"
 
 
 def get_lock_path(output_h5: Path) -> Path:
@@ -108,7 +133,9 @@ def save_incremental(pid: str, props: dict, output_h5: Path, lock: FileLock) -> 
             save_properties_to_h5({pid: props}, output_h5)
 
 
-def handle_result(pid, props, output_h5: Path, lock: FileLock, results_count: list) -> None:
+def handle_result(
+    pid, props, output_h5: Path, lock: FileLock, results_count: list
+) -> None:
     """Validate, persist, and tally a single protein result."""
     if "error" in props:
         logging.error(f"Protein {pid}: {props['error']}")
@@ -134,12 +161,19 @@ def run_parallel(directories, args, output_h5: Path, lock: FileLock) -> int:
     with concurrent.futures.ProcessPoolExecutor(max_workers=args.workers) as executor:
         futures = {
             executor.submit(
-                process_single_protein, d,
-                **submit_kwargs(d, *resolve_filenames(d, args.pdb_name, args.xtc_name, args.dynamic), args)
+                process_single_protein,
+                d,
+                **submit_kwargs(
+                    d,
+                    *resolve_filenames(d, args.pdb_name, args.xtc_name, args.dynamic),
+                    args,
+                ),
             ): d
             for d in directories
         }
-        for future in tqdm(concurrent.futures.as_completed(futures), total=len(futures)):
+        for future in tqdm(
+            concurrent.futures.as_completed(futures), total=len(futures)
+        ):
             protein_dir = futures[future]
             try:
                 pid, props = future.result()
@@ -154,28 +188,34 @@ def main():
 
     # Sort for consistent ordering across all jobs — required for modulo sharding.
     directories = sorted([d for d in args.input_dir.iterdir() if d.is_dir()])
-    output_h5 = get_output_path(args.input_dir)
-    
+    output_h5 = get_output_path(args.input_dir, args.n_subsample_trajectory)
+
     # CRITICAL FIX 2: Ensure the parent directory exists BEFORE creating the FileLock
     output_h5.parent.mkdir(parents=True, exist_ok=True)
-    
+
     # Create the lock
     lock = FileLock(get_lock_path(output_h5))
 
-    # CRITICAL FIX 3: Wrap the startup read inside the FileLock. 
-    # If another OAR job is writing its first result, this job will patiently queue 
+    # CRITICAL FIX 3: Wrap the startup read inside the FileLock.
+    # If another OAR job is writing its first result, this job will patiently queue
     # rather than crashing on a corrupted/half-written HDF5 state.
     with lock:
         already_done = get_already_processed(output_h5)
-        
+
     directories = [d for d in directories if d.name not in already_done]
 
     # Shard directories across OAR array jobs using modulo.
     if args.n_jobs > 1:
-        directories = [d for i, d in enumerate(directories) if i % args.n_jobs == args.job_index]
+        directories = [
+            d for i, d in enumerate(directories) if i % args.n_jobs == args.job_index
+        ]
 
-    print(f"[Job {args.job_index}/{args.n_jobs}] Skipping {len(already_done)} already-processed proteins.")
-    print(f"[Job {args.job_index}/{args.n_jobs}] Assigned {len(directories)} proteins to this job.")
+    print(
+        f"[Job {args.job_index}/{args.n_jobs}] Skipping {len(already_done)} already-processed proteins."
+    )
+    print(
+        f"[Job {args.job_index}/{args.n_jobs}] Assigned {len(directories)} proteins to this job."
+    )
 
     if args.debug:
         directories = directories[:5]
